@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Settings } from "lucide-react";
+import { Settings, X } from "lucide-react";
 import { Button } from "@/components/shadcn/button.tsx";
 import {
   Dialog,
@@ -14,30 +14,22 @@ import {
 import { Field, FieldDescription, FieldGroup, FieldLabel, FieldLegend, FieldSeparator, FieldSet } from "@/components/shadcn/field.tsx";
 import { Separator } from "@/components/shadcn/separator.tsx";
 import { Input } from "@/components/shadcn/input.tsx";
-import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/shadcn/input-group.tsx";
+import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from "@/components/shadcn/input-group.tsx";
 import { Combobox, ComboboxContent, ComboboxInput, ComboboxItem, ComboboxList } from "@/components/shadcn/combobox.tsx";
 import { HISTORY_WINDOW_TICKS, type HistoryWindow } from "@/lib/history-window.ts";
 import { clockLabel } from "@/lib/calculate-fastest-way-to-goal.ts";
-
-export type AppliedSettings = {
-  start_date: string;
-  start_time: string;
-  tick_minutes: number;
-  round_end_tick: number;
-};
+import { localDateKey, type PlanSettings } from "@/lib/utils/plan-data.ts";
 
 const HISTORY_LABEL_RECENT = `−${HISTORY_WINDOW_TICKS} Ticks`;
 const HISTORY_LABEL_ALL = "Alles anzeigen";
 const HISTORY_WINDOW_ITEMS = [HISTORY_LABEL_RECENT, HISTORY_LABEL_ALL];
 
 export type SettingsDialogProps = {
-  startDate: string;
-  startTime: string;
-  tickMinutes: number;
+  /** Einstellungen des angesehenen Plan-Slots. */
+  settings: PlanSettings;
+  /** Legacy, nur zur Anzeige. */
   roundEndTick: number;
-  onApplyStart: (next: AppliedSettings) => void;
-  historyWindow: HistoryWindow;
-  onHistoryWindowChange: (next: HistoryWindow) => void;
+  onApply: (next: PlanSettings) => void;
 };
 
 function normalizeTime(value: string): string | null {
@@ -56,70 +48,61 @@ function isValidDate(value: string): boolean {
   return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
 }
 
-function parsePositiveInt(value: string): number | null {
+/** Tick-Länge in Minuten, höchstens ein Tag. */
+function parseTickMinutes(value: string): number | null {
   const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) return null;
+  if (!Number.isFinite(n) || n < 1 || n > 24 * 60) return null;
   return Math.floor(n);
 }
 
-export function SettingsDialog({
-  startDate,
-  startTime,
-  tickMinutes: savedTickMinutes,
-  roundEndTick: savedRoundEndTick,
-  onApplyStart,
-  historyWindow,
-  onHistoryWindowChange,
-}: SettingsDialogProps) {
+export function SettingsDialog({ settings, roundEndTick, onApply }: SettingsDialogProps) {
   const [open, setOpen] = useState(false);
-  const [date, setDate] = useState(startDate);
-  const [time, setTime] = useState(normalizeTime(startTime) ?? startTime);
-  const [tickMinutes, setTickMinutes] = useState(String(savedTickMinutes));
-  const [roundEndTick, setRoundEndTick] = useState(String(savedRoundEndTick));
-  const [draftHistoryWindow, setDraftHistoryWindow] = useState(historyWindow);
+  const [date, setDate] = useState(settings.startDate ?? "");
+  const [time, setTime] = useState(settings.startTime);
+  const [tickMinutes, setTickMinutes] = useState(String(settings.tickMinutes));
+  const [historyWindow, setHistoryWindow] = useState<HistoryWindow>(settings.historyWindow);
 
   useEffect(() => {
     if (!open) return;
-    setDate(startDate);
-    setTime(normalizeTime(startTime) ?? startTime);
-    setTickMinutes(String(savedTickMinutes));
-    setRoundEndTick(String(savedRoundEndTick));
-    setDraftHistoryWindow(historyWindow);
-  }, [open, startDate, startTime, savedTickMinutes, savedRoundEndTick, historyWindow]);
+    setDate(settings.startDate ?? "");
+    setTime(settings.startTime);
+    setTickMinutes(String(settings.tickMinutes));
+    setHistoryWindow(settings.historyWindow);
+  }, [open, settings]);
 
-  const normalizedTime = normalizeTime(time);
-  const dateValid = isValidDate(date);
-  const parsedTickMinutes = parsePositiveInt(tickMinutes);
-  const parsedRoundEndTick = parsePositiveInt(roundEndTick);
-  const currentTime = normalizeTime(startTime) ?? startTime;
-  const startDirty =
-    date !== startDate ||
-    (normalizedTime ?? time) !== currentTime ||
-    parsedTickMinutes !== savedTickMinutes ||
-    parsedRoundEndTick !== savedRoundEndTick;
-  const historyDirty = draftHistoryWindow !== historyWindow;
-  const canApply =
-    dateValid && !!normalizedTime && parsedTickMinutes !== null && parsedRoundEndTick !== null && (startDirty || historyDirty);
+  // Ohne Datum ist Tick 0 immer heute 00:00, die Uhrzeit spielt dann keine Rolle.
+  const hasDate = date !== "";
+  const normalizedTime = hasDate ? normalizeTime(time) : settings.startTime;
+  const dateValid = !hasDate || isValidDate(date);
+  const parsedTickMinutes = parseTickMinutes(tickMinutes);
+  const next: PlanSettings | null =
+    dateValid && normalizedTime && parsedTickMinutes !== null
+      ? { startDate: hasDate ? date : null, startTime: normalizedTime, tickMinutes: parsedTickMinutes, historyWindow }
+      : null;
+  const dirty =
+    next !== null &&
+    (next.startDate !== settings.startDate ||
+      next.startTime !== settings.startTime ||
+      next.tickMinutes !== settings.tickMinutes ||
+      next.historyWindow !== settings.historyWindow);
 
   /** Alle Änderungen gelten erst mit „Übernehmen“. */
   function apply() {
-    if (!normalizedTime || !dateValid || parsedTickMinutes === null || parsedRoundEndTick === null) return;
-    if (startDirty) {
-      onApplyStart({
-        start_date: date,
-        start_time: normalizedTime,
-        tick_minutes: parsedTickMinutes,
-        round_end_tick: parsedRoundEndTick,
-      });
-    }
-    if (historyDirty) onHistoryWindowChange(draftHistoryWindow);
+    if (!next) return;
+    onApply(next);
     setOpen(false);
   }
   // Vorschau mit den eingegebenen Werten; bei kürzeren Ticks ist das reale Rundenende früher.
-  const roundEndPreview =
-    parsedRoundEndTick !== null && parsedTickMinutes !== null && dateValid && normalizedTime
-      ? clockLabel({ start_date: date, start_time: normalizedTime, tick_minutes: parsedTickMinutes }, parsedRoundEndTick)
-      : null;
+  const roundEndPreview = next
+    ? clockLabel(
+        {
+          start_date: next.startDate ?? localDateKey(new Date()),
+          start_time: next.startDate ? next.startTime : "00:00",
+          tick_minutes: next.tickMinutes,
+        },
+        roundEndTick
+      )
+    : null;
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -129,30 +112,42 @@ export function SettingsDialog({
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Einstellungen</DialogTitle>
-          <DialogDescription>Allgemeine Optionen für den Planer.</DialogDescription>
+          <DialogDescription>Gelten nur für den aktuell angezeigten Plan.</DialogDescription>
         </DialogHeader>
         <FieldGroup>
           <FieldSet>
             <FieldLegend>Runde</FieldLegend>
-            <FieldDescription>Planstart ist Tick 0. Alle Zeiten im Planer rechnen sich von diesem Zeitpunkt.</FieldDescription>
+            <FieldDescription>
+              Planstart ist Tick 0. Alle Zeiten im Planer rechnen sich von diesem Zeitpunkt. Ohne Datum ist Tick 0 immer heute um 00:00.
+            </FieldDescription>
             <div className="grid grid-cols-2 gap-3">
               <Field data-invalid={!dateValid || undefined}>
                 <FieldLabel htmlFor="settings-start-date">Datum</FieldLabel>
-                <Input
-                  id="settings-start-date"
-                  type="date"
-                  value={date}
-                  aria-invalid={!dateValid || undefined}
-                  onChange={(event) => setDate(event.target.value)}
-                />
+                <InputGroup>
+                  <InputGroupInput
+                    id="settings-start-date"
+                    type="date"
+                    value={date}
+                    aria-invalid={!dateValid || undefined}
+                    onChange={(event) => setDate(event.target.value)}
+                  />
+                  {hasDate ? (
+                    <InputGroupAddon align="inline-end">
+                      <InputGroupButton size="icon-xs" aria-label="Datum leeren" onClick={() => setDate("")}>
+                        <X />
+                      </InputGroupButton>
+                    </InputGroupAddon>
+                  ) : null}
+                </InputGroup>
               </Field>
-              <Field data-invalid={!normalizedTime || undefined}>
+              <Field data-invalid={!normalizedTime || undefined} data-disabled={!hasDate || undefined}>
                 <FieldLabel htmlFor="settings-start-time">Uhrzeit</FieldLabel>
                 <Input
                   id="settings-start-time"
                   type="time"
                   step={60}
-                  value={time}
+                  value={hasDate ? time : "00:00"}
+                  disabled={!hasDate}
                   aria-invalid={!normalizedTime || undefined}
                   onChange={(event) => setTime(event.target.value)}
                 />
@@ -187,6 +182,7 @@ export function SettingsDialog({
                   step={1}
                   inputMode="numeric"
                   value={roundEndTick}
+                  readOnly
                   disabled
                   className="tabular-nums"
                 />
@@ -205,10 +201,10 @@ export function SettingsDialog({
               <FieldLabel>Verlauf</FieldLabel>
               <Combobox
                 items={HISTORY_WINDOW_ITEMS}
-                value={draftHistoryWindow === "all" ? HISTORY_LABEL_ALL : HISTORY_LABEL_RECENT}
+                value={historyWindow === "all" ? HISTORY_LABEL_ALL : HISTORY_LABEL_RECENT}
                 onValueChange={(value) => {
-                  if (value === HISTORY_LABEL_ALL) setDraftHistoryWindow("all");
-                  else if (value === HISTORY_LABEL_RECENT) setDraftHistoryWindow("recent");
+                  if (value === HISTORY_LABEL_ALL) setHistoryWindow("all");
+                  else if (value === HISTORY_LABEL_RECENT) setHistoryWindow("recent");
                 }}
               >
                 <ComboboxInput showTrigger className="w-full" />
@@ -225,7 +221,7 @@ export function SettingsDialog({
         <Separator />
         <DialogFooter>
           <DialogClose render={<Button type="button" variant="outline" />}>Abbrechen</DialogClose>
-          <Button type="button" disabled={!canApply} onClick={apply}>
+          <Button type="button" disabled={!dirty} onClick={apply}>
             Übernehmen
           </Button>
         </DialogFooter>

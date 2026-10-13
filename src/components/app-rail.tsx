@@ -1,6 +1,7 @@
 import { type ComponentType } from "react";
 import { Link, type LinkProps } from "@tanstack/react-router";
 import { CalendarClock, ChartColumn, Radar, Swords } from "lucide-react";
+import { AccountDialog } from "@/components/auth/account-dialog.tsx";
 import { InfoDialog } from "@/components/info-dialog.tsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/shadcn/tooltip.tsx";
 import { cn } from "@/lib/utils/cn.ts";
@@ -21,8 +22,13 @@ const TOOLS: RailTool[] = [
 const ITEM_CLASS =
   "relative flex size-10 items-center justify-center rounded-lg text-muted-foreground transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/50";
 
+type AppRailProps = {
+  userKey: string;
+  userName: string;
+};
+
 /** App-weite Tool-Navigation: Leiste links, mobil oben. */
-export function AppRail() {
+export function AppRail({ userKey, userName }: AppRailProps) {
   return (
     <nav
       aria-label="Tools"
@@ -56,7 +62,8 @@ export function AppRail() {
           </Tooltip>
         );
       })}
-      <div className="mt-auto max-md:mt-0 max-md:ml-auto">
+      <div className="mt-auto flex flex-col items-center gap-1 max-md:mt-0 max-md:ml-auto max-md:flex-row">
+        <AccountDialog userKey={userKey} name={userName} />
         <InfoDialog />
       </div>
     </nav>

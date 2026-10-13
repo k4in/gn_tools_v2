@@ -149,8 +149,6 @@ export function clonePlanEntries(plan: PlanEntry[]): PlanEntry[] {
 export const planTemplates: PlanTemplate[] = [empty, balanced];
 
 export const defaults: {
-  start_time: string;
-  start_date: string;
   /** Länge eines Ticks in Minuten (GN: normalerweise 15). */
   tick_minutes: number;
   /** Simulations-Horizont / Safety-Cap in Ticks. */
@@ -161,8 +159,6 @@ export const defaults: {
   taxes: { fromTick: number; met: number; kris: number }[];
   plan: PlanEntry[];
 } = {
-  start_time: "19:30",
-  start_date: "2026-08-28",
   tick_minutes: 15,
   max_ticks: 80 * 96,
   round_end_tick: 80 * 96,

@@ -3,7 +3,6 @@ import { ExportPlanDialog } from "@/components/export-plan-dialog.tsx";
 import { ImportPlanDialog } from "@/components/import-plan-dialog.tsx";
 import { ResetPlanDialog, type ResetPlanSource } from "@/components/reset-plan-dialog.tsx";
 import { TaxesDialog } from "@/components/taxes-dialog.tsx";
-import { type PlanEntry } from "@/lib/gn-data/plan.ts";
 import { ActionPlan } from "@/components/overview/actionplan.tsx";
 import { Protocol } from "@/components/overview/protocol.tsx";
 import { Timeline } from "@/components/overview/timeline.tsx";
@@ -27,8 +26,8 @@ export type OverviewProps = {
   hasPlan: boolean;
   exportJson?: string;
   exportPlanSlot?: number;
-  onImportPlan?: (imported: { plan: PlanEntry[]; taxes: TaxSegment[] }) => void;
-  parseImportPlan?: (json: string) => { ok: true; plan: PlanEntry[]; taxes: TaxSegment[] } | { ok: false; error: string };
+  /** Ersetzt den Plan durch ein JSON; gibt bei Fehlern die Meldung zurück. */
+  onImportPlan?: (json: string) => string | null;
   onEditJob?: (planEntryId: string | undefined) => void;
   slotShortage?: ExtractorSlotShortage | null;
   resetSources?: ResetPlanSource[];
@@ -58,7 +57,6 @@ export function Overview({
   exportJson,
   exportPlanSlot,
   onImportPlan,
-  parseImportPlan,
   onEditJob,
   slotShortage = null,
   resetSources,
@@ -157,7 +155,7 @@ export function Overview({
                   </Button>
                 ))}
               <Separator orientation="vertical" className="mx-1 my-2" />
-              {parseImportPlan && onImportPlan && <ImportPlanDialog parse={parseImportPlan} onReplace={onImportPlan} />}
+              {onImportPlan && <ImportPlanDialog onImport={onImportPlan} />}
               <ExportPlanDialog json={exportJson} planSlot={exportPlanSlot ?? 1} />
               {resetSources && onResetPlan && <ResetPlanDialog sources={resetSources} onReset={onResetPlan} />}
             </div>

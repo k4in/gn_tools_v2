@@ -1,11 +1,15 @@
 // React
-import { type ClipboardEvent, type ReactNode, useMemo, useRef, useState } from "react";
+import { type ClipboardEvent, type ReactNode, useMemo, useRef } from "react";
 
 // Packages
+import { useQuery } from "convex/react";
 import { ArrowRightLeft, Plus, Trash2 } from "lucide-react";
 
+// Convex
+import { api } from "@convex/_generated/api.ts";
+
 // Lib/Utils
-import { planSlotLabel } from "@/lib/gn-data/plan.ts";
+import { planSlotLabel, type PlanSlotId } from "@/lib/gn-data/plan.ts";
 import {
   clockLabel,
   computeCurrentTick,
@@ -14,14 +18,15 @@ import {
   type StartConfig,
   type TaxSegment,
 } from "@/lib/calculate-fastest-way-to-goal.ts";
-import { configFromState, loadStoredState } from "@/lib/features/plan-storage.ts";
 import { calculateAttackProfit } from "@/lib/utils/attack-profit.ts";
 import { cn } from "@/lib/utils/cn.ts";
 import { parseAttackCalculations, type ParsedAttacker } from "@/lib/utils/parse-attack-calculation.ts";
+import { configFromPlan, localDateKey, type StoredPlan } from "@/lib/utils/plan-data.ts";
 
 // Hooks
 import { useNow } from "@/hooks/useNow.tsx";
 import { useStoredState } from "@/hooks/useStoredState.tsx";
+import { useUserKey } from "@/hooks/useUserKey.tsx";
 
 // Shadcn components
 import { Button } from "@/components/shadcn/button.tsx";
@@ -31,6 +36,9 @@ import { Input } from "@/components/shadcn/input.tsx";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/shadcn/input-group.tsx";
 import { Textarea } from "@/components/shadcn/textarea.tsx";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/shadcn/table.tsx";
+
+// Components
+import { PageLoading } from "@/components/page-loading.tsx";
 
 const STORAGE_KEY = "gn_tool.attack-profit";
 /** Auch nach Rundenende wird noch bis zu einem Jahr weitergerechnet, um den Turning Point zu zeigen. */
@@ -260,14 +268,29 @@ function GainValue({ result, index }: { result: AttackResult | null; index: numb
   return <CellValue className={gain >= 0 ? "text-green-500" : "text-destructive"} value={signed(gain)} />;
 }
 
+/** Lädt den aktiven Plan aus Convex; gerechnet wird immer mit ihm. */
 export function AttackProfitPage() {
-  const [appState] = useState(() => loadStoredState());
-  // Gerechnet wird immer mit dem aktiven Plan.
-  const planId = appState.livePlanId ?? appState.activePlanId;
+  const { userKey } = useUserKey();
+  const plans = useQuery(api.plans.list, userKey ? { key: userKey } : "skip");
+  const me = useQuery(api.users.me, userKey ? { key: userKey } : "skip");
+
+  if (!plans || !me) return <PageLoading />;
+  const planId = me.liveSlot ?? me.activeSlot;
+  const plan = plans.find((item) => item.slot === planId) ?? plans[0];
+  return <AttackProfit plan={plan} planId={planId} />;
+}
+
+type AttackProfitProps = {
+  plan: StoredPlan;
+  planId: PlanSlotId;
+};
+
+function AttackProfit({ plan, planId }: AttackProfitProps) {
   const [draft, setDraft] = useStoredState(STORAGE_KEY, loadDraft);
 
-  const cfg = useMemo(() => configFromState(appState, planId), [appState, planId]);
   const now = useNow();
+  const today = localDateKey(now);
+  const cfg = useMemo(() => configFromPlan(plan, today), [plan, today]);
   const ticksSinceStart = computeCurrentTick(cfg, now);
   const currentTick = Math.max(0, ticksSinceStart);
   const perDay = ticksPerDay(cfg);

@@ -1,8 +1,8 @@
 import { ExtractorsDialog } from "@/components/extractors-dialog.tsx";
 import { JobList } from "@/components/overview/actionplan.tsx";
-import { SettingsDialog, type AppliedSettings } from "@/components/settings-dialog.tsx";
+import { SettingsDialog } from "@/components/settings-dialog.tsx";
 import { type ReactNode } from "react";
-import { type HistoryWindow } from "@/lib/history-window.ts";
+import { type PlanSettings } from "@/lib/utils/plan-data.ts";
 import { Badge } from "@/components/shadcn/badge.tsx";
 import { Separator } from "@/components/shadcn/separator.tsx";
 import {
@@ -21,9 +21,9 @@ export type HeaderProps = {
   startCfg: StartConfig;
   plan: PlanResult | null;
   nextAction: TickSnapshot | null;
-  onApplyStart: (next: AppliedSettings) => void;
-  historyWindow: HistoryWindow;
-  onHistoryWindowChange: (next: HistoryWindow) => void;
+  /** Einstellungen des angesehenen Plan-Slots. */
+  settings: PlanSettings;
+  onApplySettings: (next: PlanSettings) => void;
   planSwitcher?: ReactNode;
 };
 
@@ -48,17 +48,7 @@ function resourcesAtCurrentTick(plan: PlanResult | null, startCfg: StartConfig, 
   return { met: best.met, kris: best.kris };
 }
 
-export function Header({
-  now,
-  currentTick,
-  startCfg,
-  plan,
-  nextAction,
-  onApplyStart,
-  historyWindow,
-  onHistoryWindowChange,
-  planSwitcher,
-}: HeaderProps) {
+export function Header({ now, currentTick, startCfg, plan, nextAction, settings, onApplySettings, planSwitcher }: HeaderProps) {
   const extractorJob = plan?.steps.find((s) => s.name === "Extraktor");
   const extractorTick = extractorJob?.endTick;
   function isPlayableJob(job: { type: string }) {
@@ -75,15 +65,7 @@ export function Header({
         <div className="flex shrink-0 items-center gap-5 py-3 pr-5">
           <div className="flex items-center gap-2">
             {planSwitcher}
-            <SettingsDialog
-              startDate={startCfg.start_date}
-              startTime={startCfg.start_time}
-              tickMinutes={startCfg.tick_minutes}
-              roundEndTick={startCfg.round_end_tick}
-              onApplyStart={onApplyStart}
-              historyWindow={historyWindow}
-              onHistoryWindowChange={onHistoryWindowChange}
-            />
+            <SettingsDialog settings={settings} roundEndTick={startCfg.round_end_tick} onApply={onApplySettings} />
           </div>
           <Separator orientation="vertical" />
           <div className="flex flex-col gap-0.5">

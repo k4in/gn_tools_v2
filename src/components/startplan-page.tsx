@@ -1,6 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+// React
+import { useMemo, useState } from "react";
+
+// Packages
+import { useQuery } from "convex/react";
+
+// Convex
+import { api } from "@convex/_generated/api.ts";
+
+// Lib/Utils
 import {
-  clonePlanEntries,
   isPlanSlotId,
   PLAN_SLOT_IDS,
   planSlotLabel,
@@ -9,11 +17,6 @@ import {
   type PlanSlotId,
   type RoidMulti,
 } from "@/lib/gn-data/plan.ts";
-import { Header } from "@/components/header.tsx";
-import { Overview } from "@/components/overview/overview.tsx";
-import { PlanSwitcher } from "@/components/plan-switcher.tsx";
-import { Sidebar } from "@/components/sidebar/sidebar.tsx";
-import { PlanEntryDialog, type PlanEntryDialogTarget } from "@/components/plan-entry-dialog.tsx";
 import {
   ASTEROID_COST,
   attackRoidStartTick,
@@ -45,17 +48,31 @@ import {
   type StartConfig,
 } from "@/lib/calculate-fastest-way-to-goal.ts";
 import {
-  cloneStoredPlan,
-  configFromState,
-  loadStoredState,
-  normalizePlan,
+  configFromPlan,
+  localDateKey,
   parseImportedPlan,
-  PLAN_STORAGE_KEY,
-  type PersistedAppState,
+  planExportJson,
+  toStoredEntries,
+  type PlanSettings,
   type StoredPlan,
-} from "@/lib/features/plan-storage.ts";
-import { TooltipProvider } from "@/components/shadcn/tooltip.tsx";
+} from "@/lib/utils/plan-data.ts";
+
+// Hooks
 import { useNow } from "@/hooks/useNow.tsx";
+import { useUpdatePlan } from "@/hooks/useUpdatePlan.tsx";
+import { useUserKey } from "@/hooks/useUserKey.tsx";
+import { useUserSlots } from "@/hooks/useUserSlots.tsx";
+
+// Shadcn components
+import { TooltipProvider } from "@/components/shadcn/tooltip.tsx";
+
+// Components
+import { Header } from "@/components/header.tsx";
+import { Overview } from "@/components/overview/overview.tsx";
+import { PageLoading } from "@/components/page-loading.tsx";
+import { PlanEntryDialog, type PlanEntryDialogTarget } from "@/components/plan-entry-dialog.tsx";
+import { PlanSwitcher } from "@/components/plan-switcher.tsx";
+import { Sidebar } from "@/components/sidebar/sidebar.tsx";
 
 /** Plan ohne einen Eintrag, z. B. um beim Bearbeiten das freie Budget zu bestimmen. */
 function withoutPlanEntry(cfg: StartConfig, entryId: string): StartConfig {
@@ -67,29 +84,51 @@ function defaultAddTick(inspectTick: number | null, currentTick: number, earlies
   return Math.max(0, preferred, earliest);
 }
 
+function logMutationError(error: unknown) {
+  console.error("Konnte Plan nicht speichern", error);
+}
+
+/** Lädt die Plan-Slots des eingeloggten Nutzers aus Convex. */
 export function StartplanPage() {
-  const [appState, setAppState] = useState<PersistedAppState>(() => loadStoredState());
-  const [viewId, setViewId] = useState<PlanSlotId>(appState.activePlanId);
+  const { userKey } = useUserKey();
+  const plans = useQuery(api.plans.list, userKey ? { key: userKey } : "skip");
+  const me = useQuery(api.users.me, userKey ? { key: userKey } : "skip");
+
+  if (!userKey || !plans || !me) return <PageLoading />;
+  return <Planner userKey={userKey} plans={plans} viewId={me.activeSlot} liveSlot={me.liveSlot} />;
+}
+
+type PlannerProps = {
+  userKey: string;
+  plans: StoredPlan[];
+  /** Angesehener Slot. */
+  viewId: PlanSlotId;
+  /** Gespielter Slot, mit dem die anderen Tools rechnen. */
+  liveSlot: PlanSlotId | null;
+};
+
+function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
+  const updatePlan = useUpdatePlan();
+  const { setActiveSlot, setLiveSlot } = useUserSlots();
   const activeSlot = viewId;
+  const current = plans.find((item) => item.slot === viewId) ?? plans[0];
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(PLAN_STORAGE_KEY, JSON.stringify(appState));
-    } catch (err) {
-      console.error("Konnte Plan nicht speichern", err);
-    }
-  }, [appState]);
+  const now = useNow();
+  const today = localDateKey(now);
+  const startCfg = useMemo(() => configFromPlan(current, today), [current, today]);
 
-  const startCfg = useMemo(() => configFromState(appState, activeSlot), [appState, activeSlot]);
+  function savePlan(patch: { entries?: PlanEntry[]; taxes?: StoredPlan["taxes"]; ignoreNonTechDeps?: boolean; settings?: PlanSettings }) {
+    const { entries, ...rest } = patch;
+    void updatePlan({
+      key: userKey,
+      slot: viewId,
+      ...rest,
+      ...(entries ? { entries: toStoredEntries(entries) } : {}),
+    }).catch(logMutationError);
+  }
 
   function updateCurrentPlan(updater: (plan: PlanEntry[]) => PlanEntry[]) {
-    setAppState((prev) => {
-      const current = prev.plans[viewId];
-      return {
-        ...prev,
-        plans: { ...prev.plans, [viewId]: { ...current, plan: updater(current.plan) } },
-      };
-    });
+    savePlan({ entries: updater(startCfg.plan) });
   }
 
   const plan = useMemo(() => {
@@ -117,8 +156,6 @@ export function StartplanPage() {
   // Angriffsflüge zählen nicht zum Planende, sollen in der Timeline aber ganz sichtbar sein.
   const maxTick = Math.max(plan?.finishTick ?? 1, ...(plan?.steps ?? []).filter((s) => s.type === "attack").map((s) => s.endTick), 1);
   const actionTicks = useMemo(() => (plan ? plan.ticks.filter((t) => t.started.length > 0) : []), [plan]);
-
-  const now = useNow();
 
   const currentTick = computeCurrentTick(startCfg, now);
   const nextAction = useMemo(() => {
@@ -732,25 +769,31 @@ export function StartplanPage() {
   }
 
   function resetPlan(sourceId: string) {
-    setAppState((prev) => {
-      const slot = viewId;
-      let next: StoredPlan | null = null;
-      if (sourceId.startsWith("template:")) {
-        const templateId = sourceId.slice("template:".length);
-        const template = planTemplates.find((item) => item.id === templateId);
-        if (!template) return prev;
-        next = { plan: clonePlanEntries(normalizePlan(template.plan)), taxes: [] };
-      } else if (sourceId.startsWith("plan:")) {
-        const id = Number(sourceId.slice("plan:".length));
-        if (!isPlanSlotId(id) || id === slot) return prev;
-        next = cloneStoredPlan(prev.plans[id]);
-      }
-      if (!next) return prev;
-      return {
-        ...prev,
-        plans: { ...prev.plans, [slot]: next },
-      };
+    if (sourceId.startsWith("template:")) {
+      const templateId = sourceId.slice("template:".length);
+      const template = planTemplates.find((item) => item.id === templateId);
+      if (!template) return;
+      savePlan({ entries: template.plan, taxes: [], ignoreNonTechDeps: false });
+    } else if (sourceId.startsWith("plan:")) {
+      const id = Number(sourceId.slice("plan:".length));
+      const source = plans.find((item) => item.slot === id);
+      if (!isPlanSlotId(id) || id === viewId || !source) return;
+      // Die Einstellungen (Startzeit usw.) gehören zum Slot und bleiben.
+      savePlan({ entries: source.entries, taxes: source.taxes, ignoreNonTechDeps: source.ignoreNonTechDeps });
+    }
+  }
+
+  /** Ersetzt den Plan durch ein importiertes JSON. Gibt eine Fehlermeldung zurück, wenn es ungültig ist. */
+  function importPlan(json: string): string | null {
+    const result = parseImportedPlan(json, current.settings);
+    if (!result.ok) return result.error;
+    savePlan({
+      entries: result.entries,
+      taxes: result.taxes,
+      ...(result.ignoreNonTechDeps !== undefined ? { ignoreNonTechDeps: result.ignoreNonTechDeps } : {}),
+      ...(result.settings ? { settings: result.settings } : {}),
     });
+    return null;
   }
 
   return (
@@ -762,20 +805,14 @@ export function StartplanPage() {
           startCfg={startCfg}
           plan={plan}
           nextAction={nextAction}
-          onApplyStart={({ start_date, start_time, tick_minutes, round_end_tick }) => {
-            setAppState((prev) => ({ ...prev, start_date, start_time, tick_minutes, round_end_tick }));
-          }}
-          historyWindow={appState.historyWindow}
-          onHistoryWindowChange={(historyWindow) => {
-            setAppState((prev) => ({ ...prev, historyWindow }));
-          }}
+          settings={current.settings}
+          onApplySettings={(settings) => savePlan({ settings })}
           planSwitcher={
             <PlanSwitcher
               viewId={viewId}
-              livePlanId={appState.livePlanId}
+              livePlanId={liveSlot}
               onViewChange={(id) => {
-                setViewId(id);
-                setAppState((prev) => ({ ...prev, activePlanId: id }));
+                void setActiveSlot({ key: userKey, slot: id }).catch(logMutationError);
               }}
             />
           }
@@ -808,24 +845,15 @@ export function StartplanPage() {
             steps={plan?.steps ?? []}
             maxTick={maxTick}
             currentTick={currentTick}
-            historyWindow={appState.historyWindow}
+            historyWindow={current.settings.historyWindow}
             inspectTick={inspectTick}
             onInspectTick={setInspectTick}
             tickClock={(tick) => clockLabel(startCfg, tick)}
             hasPlan={!!plan}
             slotShortage={plan ? getExtractorSlotShortage(plan) : null}
-            exportJson={JSON.stringify({ plan: startCfg.plan, taxes: startCfg.taxes }, null, 2)}
+            exportJson={planExportJson(current)}
             exportPlanSlot={activeSlot}
-            parseImportPlan={parseImportedPlan}
-            onImportPlan={(imported) => {
-              setAppState((prev) => ({
-                ...prev,
-                plans: {
-                  ...prev.plans,
-                  [viewId]: { plan: imported.plan, taxes: imported.taxes },
-                },
-              }));
-            }}
+            onImportPlan={importPlan}
             resetSources={[
               ...planTemplates.map((template) => ({
                 id: `template:${template.id}`,
@@ -840,24 +868,11 @@ export function StartplanPage() {
             taxes={startCfg.taxes}
             onAddSnapshot={openAddSnapshot}
             ignoreNonTechDeps={startCfg.ignore_non_tech_deps}
-            onIgnoreNonTechDepsChange={(ignoreNonTechDeps) => {
-              setAppState((prev) => ({
-                ...prev,
-                plans: { ...prev.plans, [viewId]: { ...prev.plans[viewId], ignoreNonTechDeps } },
-              }));
-            }}
-            onApplyTaxes={(next) => {
-              setAppState((prev) => {
-                const current = prev.plans[viewId];
-                return {
-                  ...prev,
-                  plans: { ...prev.plans, [viewId]: { ...current, taxes: next } },
-                };
-              });
-            }}
-            isLivePlan={appState.livePlanId === activeSlot}
+            onIgnoreNonTechDepsChange={(ignoreNonTechDeps) => savePlan({ ignoreNonTechDeps })}
+            onApplyTaxes={(taxes) => savePlan({ taxes })}
+            isLivePlan={liveSlot === activeSlot}
             onSetLivePlan={() => {
-              setAppState((prev) => ({ ...prev, livePlanId: activeSlot }));
+              void setLiveSlot({ key: userKey, slot: activeSlot }).catch(logMutationError);
             }}
             onEditJob={(planEntryId) => {
               if (planEntryId) openEditEntry(planEntryId);
