@@ -23,6 +23,7 @@ import {
   clampAttackDuration,
   byName,
   calculateFastestWayToGoal,
+  FORECAST_TICKS,
   clampAttackRoidDuration,
   clockLabel,
   computeCurrentTick,
@@ -131,14 +132,16 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
     savePlan({ entries: updater(startCfg.plan) });
   }
 
+  const currentTick = computeCurrentTick(startCfg, now);
+
   const plan = useMemo(() => {
     try {
-      return calculateFastestWayToGoal(startCfg);
+      return calculateFastestWayToGoal(startCfg, currentTick + FORECAST_TICKS);
     } catch (err) {
       console.error(err);
       return null;
     }
-  }, [startCfg]);
+  }, [startCfg, currentTick]);
 
   const addableTechs = useMemo(() => getAddableTechs(startCfg.plan), [startCfg.plan]);
   const neededTechs = useMemo(() => missingRequiredTechs(startCfg.plan), [startCfg.plan]);
@@ -157,7 +160,6 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
   const maxTick = Math.max(plan?.finishTick ?? 1, ...(plan?.steps ?? []).filter((s) => s.type === "attack").map((s) => s.endTick), 1);
   const actionTicks = useMemo(() => (plan ? plan.ticks.filter((t) => t.started.length > 0) : []), [plan]);
 
-  const currentTick = computeCurrentTick(startCfg, now);
   const nextAction = useMemo(() => {
     const ticks = actionTicks.filter((t) =>
       t.started.some((job) => job.type !== "custom" && job.type !== "trade" && job.type !== "snapshot")

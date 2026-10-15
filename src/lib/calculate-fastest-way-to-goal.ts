@@ -16,6 +16,9 @@ const utilities = baseUtilities.map((u) => (u.name === "Asteroid" ? u : withUnit
 /** @deprecated use startCfg.tick_minutes / defaults.tick_minutes */
 export const TICK_MINUTES = defaults.tick_minutes;
 
+/** Die Simulation läuft immer mindestens bis aktueller Tick + so viele Ticks. */
+export const FORECAST_TICKS = 192;
+
 const asteroidUtility = utilities.find((u) => u.name === "Asteroid");
 const ASTEROID_COST_KRIS = asteroidUtility?.cost.kris ?? 10_000;
 /** Plätze pro Asteroid — abgeleitet aus getRequiredAsteroidAmount. */
@@ -59,7 +62,7 @@ export type StartConfig = {
   tick_minutes: number;
   /** Simulations-Horizont / Safety-Cap in Ticks. */
   max_ticks: number;
-  /** Voraussichtliches Rundenende in Ticks; die Simulation läuft mindestens bis hier. */
+  /** Voraussichtliches Rundenende in Ticks; hebt den Simulations-Horizont ggf. an. */
   round_end_tick: number;
   starting_resources: { metall: number; kristall: number };
   /** Steuer-Abschnitte; Tick 0 ist immer 0%/0%. */
@@ -1057,7 +1060,12 @@ function removeQueuedExtractors(queue: Array<"met" | "kris">, resource: "met" | 
  * - Ressourcenkonflikte: früherer Wunsch-Tick hat Vorrang; gleicher Tick → Plan-Reihenfolge
  * - Unbegrenzt parallele Jobs
  */
-function simulatePlan(plan: PlanEntry[], map: Map<string, TechTreeEntry>, startCfg: StartConfig): Omit<PlanResult, "start" | "critical"> {
+function simulatePlan(
+  plan: PlanEntry[],
+  map: Map<string, TechTreeEntry>,
+  startCfg: StartConfig,
+  minEndTick: number
+): Omit<PlanResult, "start" | "critical"> {
   let res: Res = {
     met: startCfg.starting_resources.metall,
     kris: startCfg.starting_resources.kristall,
@@ -1822,6 +1830,9 @@ function simulatePlan(plan: PlanEntry[], map: Map<string, TechTreeEntry>, startC
     return resultAt(0);
   }
 
+  /** Tick, an dem alle Plan-Einträge erledigt sind; danach läuft nur noch die Vorschau. */
+  let doneTick: number | null = null;
+
   // t = 0
   {
     const snapshotJobs = applyManualSnapshots(0);
@@ -1829,10 +1840,13 @@ function simulatePlan(plan: PlanEntry[], map: Map<string, TechTreeEntry>, startC
     ticks.push(
       snapshot(0, [...snapshotJobs, ...startedJobs], finishedJobs, { met: -spent.met, kris: -spent.kris }, [], roidLoot, catastropheLoss)
     );
-    if (allDone()) return resultAt(0);
+    if (allDone()) {
+      if (minEndTick <= 0) return resultAt(0);
+      doneTick = 0;
+    }
   }
 
-  const maxTicks = maxTicksOf(startCfg);
+  const maxTicks = Math.max(maxTicksOf(startCfg), minEndTick);
   for (let t = 1; t <= maxTicks; t++) {
     const finishing = active.filter((j) => j.endTick === t);
     active = active.filter((j) => j.endTick !== t);
@@ -1924,9 +1938,13 @@ function simulatePlan(plan: PlanEntry[], map: Map<string, TechTreeEntry>, startC
     };
     ticks.push(snapshot(t, startedJobs, allFinished, delta, questEvents, roidLoot, catastropheLoss));
 
-    if (allDone()) {
-      const finishTick = Math.max(0, ...Object.values(entryFinishTicks), ...steps.map((s) => s.endTick), t);
-      return resultAt(finishTick);
+    // Planende merken, aber bis `minEndTick` weitersimulieren (Ressourcen-/Exen-Vorschau).
+    if (doneTick === null && allDone()) {
+      doneTick = Math.max(0, ...Object.values(entryFinishTicks), ...steps.map((s) => s.endTick), t);
+    }
+    if (doneTick !== null) {
+      if (t >= minEndTick) return resultAt(doneTick);
+      continue;
     }
 
     // Deadlock detection
@@ -1977,8 +1995,9 @@ function simulatePlan(plan: PlanEntry[], map: Map<string, TechTreeEntry>, startC
 
 /**
  * Berechnet den Zeitplan anhand der Plan-Einträge (desired startTick als Priorität).
+ * Simuliert wird bis zum Planende, mindestens aber bis `minEndTick` (Standard: aktueller Tick + FORECAST_TICKS).
  */
-export function calculateFastestWayToGoal(startCfg: StartConfig): PlanResult {
+export function calculateFastestWayToGoal(startCfg: StartConfig, minEndTick = computeCurrentTick(startCfg) + FORECAST_TICKS): PlanResult {
   const map = byName(techtree);
   const plan =
     startCfg.plan.length > 0
@@ -1995,7 +2014,7 @@ export function calculateFastestWayToGoal(startCfg: StartConfig): PlanResult {
   const lastTech = [...plan].reverse().find((s) => s.kind === "tech");
   const critical = lastTech ? criticalPathSet(lastTech.name, map) : new Set<string>();
 
-  const sim = simulatePlan(plan, map, { ...startCfg, plan });
+  const sim = simulatePlan(plan, map, { ...startCfg, plan }, minEndTick);
 
   // Fix goal label (ternary precedence bug-safe)
   const goal = lastTech?.name ?? (plan.length ? formatPlanEntryLabel(plan[plan.length - 1]!) : "Koloniezentrum");
