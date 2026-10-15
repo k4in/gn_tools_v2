@@ -23,7 +23,6 @@ import {
   clampAttackDuration,
   byName,
   calculateFastestWayToGoal,
-  FORECAST_TICKS,
   clampAttackRoidDuration,
   clockLabel,
   computeCurrentTick,
@@ -136,7 +135,7 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
 
   const plan = useMemo(() => {
     try {
-      return calculateFastestWayToGoal(startCfg, currentTick + FORECAST_TICKS);
+      return calculateFastestWayToGoal(startCfg, currentTick);
     } catch (err) {
       console.error(err);
       return null;
@@ -156,8 +155,13 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
 
   const attackBlocked = !hasTechInPlan(startCfg.plan, "Marineakademie");
 
-  // Angriffsflüge zählen nicht zum Planende, sollen in der Timeline aber ganz sichtbar sein.
-  const maxTick = Math.max(plan?.finishTick ?? 1, ...(plan?.steps ?? []).filter((s) => s.type === "attack").map((s) => s.endTick), 1);
+  // Timeline bis zum letzten simulierten Tick (Planende inkl. Angriffsflüge bzw. aktueller Tick, plus Vorschau).
+  const maxTick = Math.max(
+    plan?.ticks.at(-1)?.tick ?? 1,
+    plan?.finishTick ?? 1,
+    ...(plan?.steps ?? []).filter((s) => s.type === "attack").map((s) => s.endTick),
+    1
+  );
   const actionTicks = useMemo(() => (plan ? plan.ticks.filter((t) => t.started.length > 0) : []), [plan]);
 
   const nextAction = useMemo(() => {
