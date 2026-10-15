@@ -1,4 +1,4 @@
-import { useRef, type ReactNode } from "react";
+import { memo, useRef, type ReactNode } from "react";
 import { useScrollIntoViewWhenActive } from "@/hooks/useScrollIntoViewWhenActive.tsx";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/shadcn/table.tsx";
 import {
@@ -211,8 +211,8 @@ function tickAtOrAfter(ticks: TickSnapshot[], target: number) {
   return ticks.find((t) => t.tick >= target)?.tick ?? ticks.at(-1)?.tick ?? null;
 }
 
-/** Vollständiges Tick-Protokoll (Ressourcen + Aktiv/Start/Quest). */
-export function TickTable({
+/** Vollständiges Tick-Protokoll (Ressourcen + Aktiv/Start/Quest). Memoisiert, weil die Seite sekündlich neu rendert. */
+export const TickTable = memo(function TickTable({
   ticks,
   currentTick,
   inspectTick = null,
@@ -290,7 +290,7 @@ export function TickTable({
       </TableBody>
     </Table>
   );
-}
+});
 
 export type ActionPlanProps = {
   ticks: TickSnapshot[];
@@ -300,8 +300,8 @@ export type ActionPlanProps = {
   isActive?: boolean;
 };
 
-/** Kompakter Auftragsplan: Tick · Uhrzeit · Auftrag */
-export function ActionPlan({ ticks, currentTick, inspectTick = null, hasPlan, isActive = false }: ActionPlanProps) {
+/** Kompakter Auftragsplan: Tick · Uhrzeit · Auftrag. Memoisiert, weil die Seite sekündlich neu rendert. */
+export const ActionPlan = memo(function ActionPlan({ ticks, currentTick, inspectTick = null, hasPlan, isActive = false }: ActionPlanProps) {
   const currentRowRef = useRef<HTMLTableRowElement>(null);
   const nextTick = hasPlan ? (ticks.find((t) => t.tick >= currentTick && withoutCustom(t.started).length > 0)?.tick ?? null) : null;
   const inspectRowTick = hasPlan && inspectTick != null ? tickAtOrAfter(ticks, inspectTick) : null;
@@ -342,4 +342,4 @@ export function ActionPlan({ ticks, currentTick, inspectTick = null, hasPlan, is
       </TableBody>
     </Table>
   );
-}
+});

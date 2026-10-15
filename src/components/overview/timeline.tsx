@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/shadcn/tooltip.tsx";
 import { StatusDot } from "@/components/sidebar/status-dot.tsx";
 import { attackFirstCombatTick, type Job, type JobKind, type TickSnapshot } from "@/lib/calculate-fastest-way-to-goal.ts";
@@ -69,7 +69,8 @@ function packRows(jobs: Job[]): Job[][] {
   return rows;
 }
 
-export function Timeline({
+// Memoisiert, weil die Seite sekündlich neu rendert; Callbacks müssen dafür stabil sein.
+export const Timeline = memo(function Timeline({
   steps,
   ticks,
   maxTick,
@@ -405,4 +406,4 @@ export function Timeline({
       </div>
     </div>
   );
-}
+});

@@ -1084,6 +1084,9 @@ function simulatePlan(
   let extractorsKris = 0;
   let extractorSlots = 0;
   const extractorQueue: Array<"met" | "kris"> = [];
+  /** Wird bei jeder Änderung an `extractorQueue` erhöht, damit `slottedStats()` neu rechnet. */
+  let extractorQueueVersion = 0;
+  let slottedCache: { version: number; length: number; slots: number; stats: ReturnType<typeof slottedExtractorStats> } | null = null;
   let scanverstaerker = 0;
   let firstRoidStartTick: number | null = null;
   /** Angriffsflüge, bei deren erstem Kampftick noch kein Cleptor fertig war. */
@@ -1240,13 +1243,87 @@ function simulatePlan(
     }
   }
 
-  const startOrder = plan
+  // Schneller Zugriff auf Pending-Einträge; bei doppelten IDs gilt wie bei `.find()` der erste.
+  function indexByEntryId<T extends { entryId: string }>(items: T[]): Map<string, T> {
+    const index = new Map<string, T>();
+    for (const item of items) if (!index.has(item.entryId)) index.set(item.entryId, item);
+    return index;
+  }
+  const pendingUnitById = indexByEntryId(pendingUnits);
+  const pendingEconomyById = indexByEntryId(pendingEconomy);
+  const pendingCustomById = indexByEntryId(pendingCustom);
+  const pendingTradeById = indexByEntryId(pendingTrades);
+  const pendingRoidById = indexByEntryId(pendingRoids);
+  const pendingCatastropheById = indexByEntryId(pendingCatastrophes);
+
+  /** Eintrag hat in `tryStart` nichts mehr zu tun (und bekommt auch nie wieder etwas). */
+  function isEntryClosed(entry: PlanEntry): boolean {
+    switch (entry.kind) {
+      case "tech":
+        return pendingTechs.get(entry.name)?.entryId !== entry.id;
+      case "unit":
+      case "recon": {
+        const pending = pendingUnitById.get(entry.id);
+        return !pending || pending.remaining <= 0;
+      }
+      case "economy":
+      case "asteroids":
+      case "extractors": {
+        const pending = pendingEconomyById.get(entry.id);
+        return !pending || (pending.remainingAsteroids <= 0 && pending.remainingExtractorsMet <= 0 && pending.remainingExtractorsKris <= 0);
+      }
+      case "trade": {
+        const pending = pendingTradeById.get(entry.id);
+        return !pending || pending.done;
+      }
+      case "custom": {
+        const pending = pendingCustomById.get(entry.id);
+        return !pending || pending.done;
+      }
+      case "roid":
+      case "attack": {
+        const pending = pendingRoidById.get(entry.id);
+        return !pending || pending.ticksDone >= pending.duration;
+      }
+      case "catastrophe": {
+        const pending = pendingCatastropheById.get(entry.id);
+        return !pending || pending.ticksDone >= pending.duration;
+      }
+      default:
+        return true;
+    }
+  }
+
+  /**
+   * Noch offene Einträge, sortiert nach Wunsch-Tick (gleicher Tick → Plan-Reihenfolge).
+   * Erledigte Einträge fliegen raus, damit `tryStart` nicht jeden Tick den ganzen Plan durchläuft.
+   */
+  const openOrder = plan
     .map((entry, index) => ({ entry, index }))
     .sort((a, b) => a.entry.startTick - b.entry.startTick || a.index - b.index)
-    .map(({ entry }) => entry);
+    .map(({ entry }) => entry)
+    .filter((entry) => !isEntryClosed(entry));
 
   function totalExtractors() {
     return extractorsMet + extractorsKris;
+  }
+
+  /** `slottedExtractorStats` für den aktuellen Stand, gecacht bis sich Queue oder Slots ändern. */
+  function slottedStats() {
+    if (
+      slottedCache === null ||
+      slottedCache.version !== extractorQueueVersion ||
+      slottedCache.length !== extractorQueue.length ||
+      slottedCache.slots !== extractorSlots
+    ) {
+      slottedCache = {
+        version: extractorQueueVersion,
+        length: extractorQueue.length,
+        slots: extractorSlots,
+        stats: slottedExtractorStats(extractorQueue, extractorSlots),
+      };
+    }
+    return slottedCache.stats;
   }
 
   function isReady(name: string) {
@@ -1255,6 +1332,8 @@ function simulatePlan(
   }
 
   function allDone() {
+    // Offene Einträge bedeuten immer "nicht fertig"; die Detailprüfung bleibt für den Rest.
+    if (openOrder.length > 0) return false;
     if (pendingTechs.size > 0) return false;
     if (pendingUnits.some((u) => u.remaining > 0)) return false;
     if (pendingEconomy.some((u) => u.remainingAsteroids > 0 || u.remainingExtractorsMet > 0 || u.remainingExtractorsKris > 0)) {
@@ -1291,6 +1370,7 @@ function simulatePlan(
       extractorQueue.length = 0;
       for (let i = 0; i < extractorsMet; i++) extractorQueue.push("met");
       for (let i = 0; i < extractorsKris; i++) extractorQueue.push("kris");
+      extractorQueueVersion += 1;
       const name = formatSnapshotPlanLabel(pending);
       const job: Job = {
         name,
@@ -1317,7 +1397,12 @@ function simulatePlan(
     let spent: Res = { met: 0, kris: 0 };
 
     // Earlier desired startTick first; same tick keeps plan order.
-    for (const entry of startOrder) {
+    // Kein Eintrag startet vor seinem startTick (alle Wunsch-Ticks sind ≥ startTick),
+    // daher reicht es, die bereits fälligen Einträge vorne in `openOrder` zu prüfen.
+    let due = 0;
+    for (const entry of openOrder) {
+      if (entry.startTick > tick) break;
+      due += 1;
       if (entry.kind === "tech") {
         const pending = pendingTechs.get(entry.name);
         if (!pending || pending.entryId !== entry.id) continue;
@@ -1357,7 +1442,7 @@ function simulatePlan(
       }
 
       if (entry.kind === "unit" || entry.kind === "recon") {
-        const pending = pendingUnits.find((u) => u.entryId === entry.id);
+        const pending = pendingUnitById.get(entry.id);
         if (!pending || pending.remaining <= 0) continue;
         if (tick < pending.desiredTick) continue;
 
@@ -1420,7 +1505,7 @@ function simulatePlan(
       }
 
       if (entry.kind === "economy" || entry.kind === "asteroids" || entry.kind === "extractors") {
-        const pending = pendingEconomy.find((p) => p.entryId === entry.id);
+        const pending = pendingEconomyById.get(entry.id);
         if (!pending) continue;
         if (pending.remainingAsteroids <= 0 && pending.remainingExtractorsMet <= 0 && pending.remainingExtractorsKris <= 0) {
           continue;
@@ -1467,6 +1552,7 @@ function simulatePlan(
             if (resource === "met") extractorsMet += 1;
             else extractorsKris += 1;
             extractorQueue.push(resource);
+            extractorQueueVersion += 1;
             economy[remainingKey] -= 1;
             didWork = true;
             const label = resource === "met" ? `Extraktor (Metall) #${extractorsMet}` : `Extraktor (Kristall) #${extractorsKris}`;
@@ -1495,7 +1581,7 @@ function simulatePlan(
       }
 
       if (entry.kind === "trade") {
-        const pending = pendingTrades.find((p) => p.entryId === entry.id);
+        const pending = pendingTradeById.get(entry.id);
         if (!pending || pending.done) continue;
         if (tick < pending.desiredTick) continue;
         const have = pending.give === "met" ? res.met : res.kris;
@@ -1544,7 +1630,7 @@ function simulatePlan(
       }
 
       if (entry.kind === "custom") {
-        const pending = pendingCustom.find((p) => p.entryId === entry.id);
+        const pending = pendingCustomById.get(entry.id);
         if (!pending || pending.done) continue;
         if (tick < pending.desiredTick) continue;
         if (!canAfford(res, pending.cost)) continue;
@@ -1581,7 +1667,7 @@ function simulatePlan(
       }
 
       if (entry.kind === "roid" || entry.kind === "attack") {
-        const pending = pendingRoids.find((p) => p.entryId === entry.id);
+        const pending = pendingRoidById.get(entry.id);
         if (!pending || pending.ticksDone >= pending.duration) continue;
         if (tick < pending.desiredTick) continue;
         if (tick !== pending.desiredTick + pending.ticksDone) continue;
@@ -1613,10 +1699,12 @@ function simulatePlan(
         if (stealMet > 0) {
           extractorsMet += stealMet;
           for (let i = 0; i < stealMet; i++) extractorQueue.push("met");
+          extractorQueueVersion += 1;
         }
         if (stealKris > 0) {
           extractorsKris += stealKris;
           for (let i = 0; i < stealKris; i++) extractorQueue.push("kris");
+          extractorQueueVersion += 1;
         }
         if (stealMet > 0 || stealKris > 0) {
           roidLoot.push({ planEntryId: entry.id, met: stealMet, kris: stealKris });
@@ -1629,7 +1717,7 @@ function simulatePlan(
       }
 
       if (entry.kind === "catastrophe") {
-        const pending = pendingCatastrophes.find((p) => p.entryId === entry.id);
+        const pending = pendingCatastropheById.get(entry.id);
         if (!pending || pending.ticksDone >= pending.duration) continue;
         if (tick < pending.desiredTick) continue;
         if (tick !== pending.desiredTick + pending.ticksDone) continue;
@@ -1659,10 +1747,12 @@ function simulatePlan(
         if (stealMet > 0) {
           extractorsMet -= stealMet;
           removeQueuedExtractors(extractorQueue, "met", stealMet);
+          extractorQueueVersion += 1;
         }
         if (stealKris > 0) {
           extractorsKris -= stealKris;
           removeQueuedExtractors(extractorQueue, "kris", stealKris);
+          extractorQueueVersion += 1;
         }
         if (stealMet > 0 || stealKris > 0) {
           catastropheLoss.push({ planEntryId: entry.id, met: stealMet, kris: stealKris });
@@ -1673,6 +1763,12 @@ function simulatePlan(
           markEntryFinish(entry.id, tick);
         }
       }
+    }
+
+    // Erledigte Einträge aus dem fälligen Teil entfernen; Reihenfolge bleibt erhalten.
+    if (due > 0) {
+      const stillOpen = openOrder.slice(0, due).filter((entry) => !isEntryClosed(entry));
+      if (stillOpen.length !== due) openOrder.splice(0, due, ...stillOpen);
     }
 
     return { startedJobs, finishedJobs, spent, roidLoot, catastropheLoss };
@@ -1687,9 +1783,11 @@ function simulatePlan(
       } else if (q.reward.resource === "met") {
         extractorsMet += q.reward.count;
         for (let i = 0; i < q.reward.count; i++) extractorQueue.push("met");
+        extractorQueueVersion += 1;
       } else {
         extractorsKris += q.reward.count;
         for (let i = 0; i < q.reward.count; i++) extractorQueue.push("kris");
+        extractorQueueVersion += 1;
       }
       events.push({ id: q.id, label: q.label, reward: q.reward });
     }
@@ -1739,7 +1837,7 @@ function simulatePlan(
     roidLoot: RoidLootEvent[] = [],
     catastropheLoss: RoidLootEvent[] = []
   ): TickSnapshot {
-    const slotted = slottedExtractorStats(extractorQueue, extractorSlots);
+    const slotted = slottedStats();
     return {
       tick,
       clockLabel: clockLabel(startCfg, tick),
@@ -1803,7 +1901,7 @@ function simulatePlan(
   }
 
   function resultAt(finishTick: number) {
-    const slotted = slottedExtractorStats(extractorQueue, extractorSlots);
+    const slotted = slottedStats();
     return {
       goal: techEntries.at(-1)?.name ?? (plan.length ? formatPlanEntryLabel(plan[plan.length - 1]!) : "Plan"),
       finishTick,
@@ -1868,7 +1966,7 @@ function simulatePlan(
         completedAt.set(job.name, t);
         if (job.planEntryId) markEntryFinish(job.planEntryId, t);
       } else if (job.type === "unit" && job.planEntryId) {
-        const unit = pendingUnits.find((u) => u.entryId === job.planEntryId);
+        const unit = pendingUnitById.get(job.planEntryId);
         if (unit) completedUnits.add(unit.name);
         if (entryFinishTicks[job.planEntryId] === undefined) {
           const stillActive = active.some((j) => j.planEntryId === job.planEntryId);
@@ -1899,7 +1997,7 @@ function simulatePlan(
       })
     );
     const mineIncome = incomeFrom(producing);
-    const extIncome = slottedExtractorStats(extractorQueue, extractorSlots).income;
+    const extIncome = slottedStats().income;
     const income = taxedIncome(
       {
         met: mineIncome.met + extIncome.met,
@@ -1933,7 +2031,9 @@ function simulatePlan(
       { met: 0, kris: 0 }
     );
 
-    const waiting = !allDone() && startedJobs.length === 0 && active.length === 0 && roidLoot.length === 0 && catastropheLoss.length === 0;
+    // Nach Planende bleibt alles erledigt, die Prüfung ist dann überflüssig.
+    const planDone = doneTick !== null || allDone();
+    const waiting = !planDone && startedJobs.length === 0 && active.length === 0 && roidLoot.length === 0 && catastropheLoss.length === 0;
 
     if (waiting) {
       waitStreak += 1;
@@ -1949,7 +2049,7 @@ function simulatePlan(
     ticks.push(snapshot(t, startedJobs, allFinished, delta, questEvents, roidLoot, catastropheLoss));
 
     // Planende merken, aber bis `endTick` weitersimulieren (Ressourcen-/Exen-Vorschau).
-    if (doneTick === null && allDone()) {
+    if (doneTick === null && planDone) {
       doneTick = Math.max(0, ...Object.values(entryFinishTicks), ...steps.map((s) => s.endTick), t);
       endTick = forecastEndTick(doneTick);
     }
@@ -1991,9 +2091,7 @@ function simulatePlan(
         (stuckTech || stuckEco || stuckCustom || stuckTrade || pendingUnits.some((u) => u.remaining > 0))
       ) {
         // If purely waiting for income that will never come
-        const anyFutureIncome =
-          [...completed].some((n) => INCOME_BY_BUILDING[n]) ||
-          slottedExtractorStats(extractorQueue, extractorSlots).unslotted < extractorQueue.length;
+        const anyFutureIncome = [...completed].some((n) => INCOME_BY_BUILDING[n]) || slottedStats().unslotted < extractorQueue.length;
         if (!anyFutureIncome) {
           throw new Error(`Plan nicht erreichbar: keine Produktion und unzureichende Ressourcen bei Tick ${t}`);
         }
@@ -2004,11 +2102,44 @@ function simulatePlan(
   throw new Error(`Plan nicht in ${maxTicks} Ticks abgeschlossen`);
 }
 
+type PlanOutcome = { ok: true; result: PlanResult } | { ok: false; error: unknown };
+
+/**
+ * Ergebnisse pro Konfigurations-Objekt und aktuellem Tick. StartConfig-Objekte werden nie
+ * verändert (neue Pläne erzeugen neue Objekte), daher ist die Objekt-Identität ein sicherer Schlüssel.
+ */
+const planCache = new WeakMap<StartConfig, Map<number, PlanOutcome>>();
+const PLAN_CACHE_TICKS_PER_CONFIG = 4;
+
 /**
  * Berechnet den Zeitplan anhand der Plan-Einträge (desired startTick als Priorität).
  * Simuliert wird bis max(aktueller Tick, Planende inkl. Angriffsflüge) + FORECAST_TICKS.
+ * Das Ergebnis wird gecacht und geteilt, es darf nicht verändert werden.
  */
 export function calculateFastestWayToGoal(startCfg: StartConfig, currentTick = computeCurrentTick(startCfg)): PlanResult {
+  let byTick = planCache.get(startCfg);
+  if (!byTick) {
+    byTick = new Map();
+    planCache.set(startCfg, byTick);
+  }
+  let outcome = byTick.get(currentTick);
+  if (!outcome) {
+    try {
+      outcome = { ok: true, result: computePlan(startCfg, currentTick) };
+    } catch (error) {
+      outcome = { ok: false, error };
+    }
+    if (byTick.size >= PLAN_CACHE_TICKS_PER_CONFIG) {
+      const oldest = byTick.keys().next();
+      if (!oldest.done) byTick.delete(oldest.value);
+    }
+    byTick.set(currentTick, outcome);
+  }
+  if (!outcome.ok) throw outcome.error;
+  return outcome.result;
+}
+
+function computePlan(startCfg: StartConfig, currentTick: number): PlanResult {
   const map = byName(techtree);
   const plan =
     startCfg.plan.length > 0

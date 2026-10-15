@@ -1,5 +1,5 @@
 // React
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 // Packages
 import { useQuery } from "convex/react";
@@ -178,6 +178,76 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
   const [dialogMode, setDialogMode] = useState<"add" | "edit">("add");
   const [dialogTarget, setDialogTarget] = useState<PlanEntryDialogTarget | null>(null);
   const [editingEntry, setEditingEntry] = useState<PlanEntry | null>(null);
+
+  // Beim Bearbeiten ohne den Eintrag selbst simulieren, sonst fehlen dessen Kosten im Budget
+  // (bzw. zählen doppelt, wenn er später startet). Memoisiert, damit der Simulations-Cache greift.
+  const unitBudgetCfg = useMemo(
+    () => (dialogMode === "edit" && editingEntry ? withoutPlanEntry(startCfg, editingEntry.id) : startCfg),
+    [dialogMode, editingEntry, startCfg]
+  );
+
+  // Stabile Callbacks: der Dialog rechnet nur neu, wenn sich Plan, Ziel oder Tick ändern,
+  // nicht bei jedem sekündlichen Re-Render durch die Uhr.
+  const resolveMaxCount = useCallback(
+    (tick: number) => {
+      if (!dialogTarget) return 1;
+      if (dialogTarget.kind === "unit" || dialogTarget.kind === "recon") {
+        return getMaxBuildCountAtTick(unitBudgetCfg, dialogTarget.kind, dialogTarget.name, tick);
+      }
+      return 999;
+    },
+    [dialogTarget, unitBudgetCfg]
+  );
+
+  const resolveEconomyAtTick = useCallback(
+    (tick: number) => {
+      const info = getMaxExtractorsAtTick(startCfg, tick);
+      const snap = getResourcesAtTick(startCfg, tick);
+      let bonusAst = 0;
+      let bonusExt = 0;
+      if (dialogMode === "edit" && editingEntry) {
+        if (editingEntry.kind === "economy") {
+          bonusAst = editingEntry.asteroids;
+          bonusExt = editingEntry.extractorsMet + editingEntry.extractorsKris;
+        } else if (editingEntry.kind === "asteroids") {
+          bonusAst = editingEntry.count;
+        } else if (editingEntry.kind === "extractors") {
+          bonusExt = editingEntry.count;
+        }
+      }
+      const asteroids = Math.max(0, info.asteroids - bonusAst);
+      const alreadyBuilt = Math.max(0, info.alreadyBuilt - bonusExt);
+      const freeSlots = Math.max(0, asteroids * 20 - alreadyBuilt);
+      // Refund costs of the entry being edited so max reflects free budget.
+      const refundKris = bonusAst * ASTEROID_COST.kris;
+      const refundMet = bonusExt > 0 ? extractorBatchCost(alreadyBuilt, bonusExt) : 0;
+      let met = snap.met + refundMet;
+      let kris = snap.kris + refundKris;
+      if (dialogMode === "edit" && editingEntry?.kind === "trade") {
+        if (editingEntry.give === "met") met += editingEntry.giveAmount;
+        else kris += editingEntry.giveAmount;
+      }
+      return {
+        freeSlots,
+        asteroids,
+        alreadyBuilt,
+        met,
+        kris,
+      };
+    },
+    [dialogMode, editingEntry, startCfg]
+  );
+
+  // Stabile Props für die memoisierte Timeline.
+  const tickClock = useCallback((tick: number) => clockLabel(startCfg, tick), [startCfg]);
+  const exportJson = useMemo(() => planExportJson(current), [current]);
+  const openEditEntryRef = useRef<(id: string) => void>(() => {});
+  useEffect(() => {
+    openEditEntryRef.current = openEditEntry;
+  });
+  const onEditJob = useCallback((planEntryId: string | undefined) => {
+    if (planEntryId) openEditEntryRef.current(planEntryId);
+  }, []);
 
   function openAddTech(name: string) {
     const tech = byName().get(name);
@@ -854,10 +924,10 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
             historyWindow={current.settings.historyWindow}
             inspectTick={inspectTick}
             onInspectTick={setInspectTick}
-            tickClock={(tick) => clockLabel(startCfg, tick)}
+            tickClock={tickClock}
             hasPlan={!!plan}
             slotShortage={plan ? getExtractorSlotShortage(plan) : null}
-            exportJson={planExportJson(current)}
+            exportJson={exportJson}
             exportPlanSlot={activeSlot}
             onImportPlan={importPlan}
             resetSources={[
@@ -880,9 +950,7 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
             onSetLivePlan={() => {
               void setLiveSlot({ key: userKey, slot: activeSlot }).catch(logMutationError);
             }}
-            onEditJob={(planEntryId) => {
-              if (planEntryId) openEditEntry(planEntryId);
-            }}
+            onEditJob={onEditJob}
           />
         </div>
 
@@ -895,51 +963,8 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
           entry={editingEntry}
           onSubmit={handleDialogSubmit}
           onRemove={dialogMode === "edit" ? handleDialogRemove : undefined}
-          resolveMaxCount={(tick) => {
-            if (!dialogTarget) return 1;
-            // Beim Bearbeiten ohne den Eintrag selbst simulieren, sonst fehlen
-            // dessen Kosten im Budget (bzw. zählen doppelt, wenn er später startet).
-            if (dialogTarget.kind === "unit" || dialogTarget.kind === "recon") {
-              const cfg = dialogMode === "edit" && editingEntry ? withoutPlanEntry(startCfg, editingEntry.id) : startCfg;
-              return getMaxBuildCountAtTick(cfg, dialogTarget.kind, dialogTarget.name, tick);
-            }
-            return 999;
-          }}
-          resolveEconomyAtTick={(tick) => {
-            const info = getMaxExtractorsAtTick(startCfg, tick);
-            const snap = getResourcesAtTick(startCfg, tick);
-            let bonusAst = 0;
-            let bonusExt = 0;
-            if (dialogMode === "edit" && editingEntry) {
-              if (editingEntry.kind === "economy") {
-                bonusAst = editingEntry.asteroids;
-                bonusExt = editingEntry.extractorsMet + editingEntry.extractorsKris;
-              } else if (editingEntry.kind === "asteroids") {
-                bonusAst = editingEntry.count;
-              } else if (editingEntry.kind === "extractors") {
-                bonusExt = editingEntry.count;
-              }
-            }
-            const asteroids = Math.max(0, info.asteroids - bonusAst);
-            const alreadyBuilt = Math.max(0, info.alreadyBuilt - bonusExt);
-            const freeSlots = Math.max(0, asteroids * 20 - alreadyBuilt);
-            // Refund costs of the entry being edited so max reflects free budget.
-            const refundKris = bonusAst * ASTEROID_COST.kris;
-            const refundMet = bonusExt > 0 ? extractorBatchCost(alreadyBuilt, bonusExt) : 0;
-            let met = snap.met + refundMet;
-            let kris = snap.kris + refundKris;
-            if (dialogMode === "edit" && editingEntry?.kind === "trade") {
-              if (editingEntry.give === "met") met += editingEntry.giveAmount;
-              else kris += editingEntry.giveAmount;
-            }
-            return {
-              freeSlots,
-              asteroids,
-              alreadyBuilt,
-              met,
-              kris,
-            };
-          }}
+          resolveMaxCount={resolveMaxCount}
+          resolveEconomyAtTick={resolveEconomyAtTick}
         />
       </main>
     </TooltipProvider>
