@@ -89,8 +89,16 @@ export const planSettingsValidator = v.object({
   historyWindow: v.union(v.literal("recent"), v.literal("all")),
 });
 
+/**
+ * Version der Plan-Semantik. 1 (fehlt): Einträge starten frühestens am `startTick` und warten auf
+ * Rohstoffe. 2: Einträge starten genau am `startTick`, fehlende Rohstoffe machen das Konto negativ.
+ */
+export const CURRENT_PLAN_VERSION = 2;
+
 export const planFields = {
   entries: v.array(planEntryValidator),
+  /** Fehlt bei Plänen von vor Version 2; die werden im Client migriert. */
+  planVersion: v.optional(v.number()),
   taxes: v.array(taxSegmentValidator),
   /** Quereinstieg: fehlende Voraussetzungen bei Einheiten und Wirtschaft ignorieren. */
   ignoreNonTechDeps: v.boolean(),

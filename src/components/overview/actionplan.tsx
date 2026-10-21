@@ -17,7 +17,7 @@ export type DisplayJob = {
   type: JobKind;
   suffix?: string;
   cost?: { met: number; kris: number };
-  delayed?: boolean;
+  underfunded?: boolean;
 };
 
 function formatCustomCost(cost: { met: number; kris: number }) {
@@ -46,23 +46,29 @@ export function collapseEconomyJobs(items: DisplayJob[]): DisplayJob[] {
   let extractorsMet = 0;
   let extractorsKris = 0;
   let extractorsGeneric = 0;
+  /** Zusammengefasste Zeilen, in denen mindestens ein Teil die Rohstoffe überzogen hat. */
+  const underfunded = new Set<"asteroids" | "met" | "kris" | "generic">();
   const rest: DisplayJob[] = [];
 
   for (const item of items) {
     if (item.type === "economy" && item.name.startsWith("Asteroid scannen")) {
       asteroids += 1;
+      if (item.underfunded) underfunded.add("asteroids");
       continue;
     }
     if (item.type === "economy" && item.name.startsWith("Extraktor (Metall)")) {
       extractorsMet += 1;
+      if (item.underfunded) underfunded.add("met");
       continue;
     }
     if (item.type === "economy" && item.name.startsWith("Extraktor (Kristall)")) {
       extractorsKris += 1;
+      if (item.underfunded) underfunded.add("kris");
       continue;
     }
     if (item.type === "economy" && /^Extraktor\b/.test(item.name)) {
       extractorsGeneric += 1;
+      if (item.underfunded) underfunded.add("generic");
       continue;
     }
     // Already batched unit/recon labels pass through as-is
@@ -74,24 +80,28 @@ export function collapseEconomyJobs(items: DisplayJob[]): DisplayJob[] {
     out.push({
       name: asteroids === 1 ? "1 Asteroid scannen" : `${asteroids} Asteroiden scannen`,
       type: "economy",
+      underfunded: underfunded.has("asteroids"),
     });
   }
   if (extractorsMet > 0) {
     out.push({
       name: extractorsMet === 1 ? "1 Metallextraktor bauen" : `${extractorsMet} Metallextraktoren bauen`,
       type: "economy",
+      underfunded: underfunded.has("met"),
     });
   }
   if (extractorsKris > 0) {
     out.push({
       name: extractorsKris === 1 ? "1 Kristallextraktor bauen" : `${extractorsKris} Kristallextraktoren bauen`,
       type: "economy",
+      underfunded: underfunded.has("kris"),
     });
   }
   if (extractorsGeneric > 0) {
     out.push({
       name: extractorsGeneric === 1 ? "1 Extraktor bauen" : `${extractorsGeneric} Extraktoren bauen`,
       type: "economy",
+      underfunded: underfunded.has("generic"),
     });
   }
   return [...out, ...rest];
@@ -169,7 +179,7 @@ export function JobList({ items }: { items: DisplayJob[] }) {
             {i > 0 && <span className="text-muted-foreground">, </span>}
             <span className={jobTypeClass(item.type)}>
               {item.name}
-              {item.delayed ? <StatusDot kind="delayed" /> : null}
+              {item.underfunded ? <StatusDot kind="underfunded" /> : null}
               {extra ? <span className="text-muted-foreground"> {extra}</span> : null}
             </span>
           </span>
@@ -263,8 +273,8 @@ export const TickTable = memo(function TickTable({
             <TableRow key={t.tick} ref={scrollTick === t.tick ? currentRowRef : undefined} className={cn(isNow && "bg-green-500/15")}>
               <TableCell className="tabular-nums">{t.tick}</TableCell>
               <TableCell className={cn("tabular-nums", isInspect && "text-primary")}>{t.clockLabel}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatRes(t.met)}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatRes(t.kris)}</TableCell>
+              <TableCell className={cn("text-right tabular-nums", t.met < 0 && "text-destructive")}>{formatRes(t.met)}</TableCell>
+              <TableCell className={cn("text-right tabular-nums", t.kris < 0 && "text-destructive")}>{formatRes(t.kris)}</TableCell>
               <TableCell className={cn("text-right tabular-nums", deltaClass(t.incomeMet))}>{formatDelta(t.incomeMet)}</TableCell>
               <TableCell className={cn("text-right tabular-nums", deltaClass(t.incomeKris))}>{formatDelta(t.incomeKris)}</TableCell>
               <TruncateCell>

@@ -38,7 +38,7 @@ export function Legend() {
           [
             ["needed", "benötigt"],
             ["blocked", "Voraussetzung fehlt"],
-            ["delayed", "verspätet"],
+            ["underfunded", "Rohstoffe fehlen"],
           ] as const
         ).map(([kind, label]) => (
           <span key={kind} className="inline-flex items-center gap-1">

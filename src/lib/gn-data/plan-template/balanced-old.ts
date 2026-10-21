@@ -129,7 +129,7 @@ export const balancedOld: PlanTemplate = {
       id: "tech_mruqbebf_z8ybhg",
       kind: "tech",
       name: "Waffenfabriken",
-      startTick: 99,
+      startTick: 106,
     },
     {
       id: "tech_mruqdr0j_ychpqb",

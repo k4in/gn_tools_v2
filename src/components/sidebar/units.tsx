@@ -27,11 +27,13 @@ type Buildable = {
 
 function UnitRows({
   items,
+  kind,
   planned,
   ignoreMissingDeps,
   onAdd,
 }: {
   items: Buildable[];
+  kind: "unit" | "recon";
   planned: Set<string>;
   ignoreMissingDeps: boolean;
   onAdd: (name: string) => void;
@@ -42,6 +44,7 @@ function UnitRows({
         <SidebarRow
           key={item.name}
           onClick={() => onAdd(item.name)}
+          drag={{ item: { kind, name: item.name }, label: item.name }}
           titleClassName={jobTypeClass("unit")}
           title={
             <>
@@ -61,11 +64,11 @@ export function Units({ ships, defenses, recon, planned, ignoreMissingDeps = fal
     <ScrollArea className="min-h-0 flex-1">
       <div className="pb-2">
         <SidebarSectionLabel>Raumschiffe</SidebarSectionLabel>
-        <UnitRows items={ships} planned={planned} ignoreMissingDeps={ignoreMissingDeps} onAdd={onAdd} />
+        <UnitRows items={ships} kind="unit" planned={planned} ignoreMissingDeps={ignoreMissingDeps} onAdd={onAdd} />
         <SidebarSectionLabel>Geschütze</SidebarSectionLabel>
-        <UnitRows items={defenses} planned={planned} ignoreMissingDeps={ignoreMissingDeps} onAdd={onAdd} />
+        <UnitRows items={defenses} kind="unit" planned={planned} ignoreMissingDeps={ignoreMissingDeps} onAdd={onAdd} />
         <SidebarSectionLabel>Aufklärung</SidebarSectionLabel>
-        <UnitRows items={recon} planned={planned} ignoreMissingDeps={ignoreMissingDeps} onAdd={onAddRecon} />
+        <UnitRows items={recon} kind="recon" planned={planned} ignoreMissingDeps={ignoreMissingDeps} onAdd={onAddRecon} />
       </div>
     </ScrollArea>
   );

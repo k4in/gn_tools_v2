@@ -3,7 +3,7 @@ import { ConvexError, v } from "convex/values";
 import { mutation, query } from "./_generated/server.ts";
 import { assertPlanEntries } from "./lib/planChecks.ts";
 import { findUserByKey, hashUserKey, requireUserByKey } from "./lib/userKey.ts";
-import { DEFAULT_PLAN_SETTINGS, planEntryValidator, planSlotValidator } from "./lib/validators.ts";
+import { CURRENT_PLAN_VERSION, DEFAULT_PLAN_SETTINGS, planEntryValidator, planSlotValidator } from "./lib/validators.ts";
 
 const USER_NAME_MIN_LENGTH = 3;
 const USER_NAME_MAX_LENGTH = 40;
@@ -53,7 +53,15 @@ export const create = mutation({
       liveSlot: null,
     });
     for (const slot of PLAN_SLOTS) {
-      await ctx.db.insert("plans", { userId, slot, entries, taxes: [], ignoreNonTechDeps: false, settings: DEFAULT_PLAN_SETTINGS });
+      await ctx.db.insert("plans", {
+        userId,
+        slot,
+        entries,
+        planVersion: CURRENT_PLAN_VERSION,
+        taxes: [],
+        ignoreNonTechDeps: false,
+        settings: DEFAULT_PLAN_SETTINGS,
+      });
     }
     return null;
   },

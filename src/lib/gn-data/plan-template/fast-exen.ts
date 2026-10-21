@@ -57,7 +57,7 @@ export const fastExen: PlanTemplate = {
       id: "tech_mtfqtwq6_dy7yks",
       kind: "tech",
       name: "Tiefe Kristallminen",
-      startTick: 14,
+      startTick: 16,
     },
     {
       id: "tech_mtfqw11p_7ugvb9",

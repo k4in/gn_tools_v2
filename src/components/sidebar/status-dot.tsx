@@ -1,19 +1,19 @@
-import { Clock3 } from "lucide-react";
+import { Coins } from "lucide-react";
 import { cn } from "@/lib/utils/cn.ts";
 
-export type StatusDotKind = "needed" | "blocked" | "delayed";
+export type StatusDotKind = "needed" | "blocked" | "underfunded";
 
 /**
  * Status-Marker hinter einem Namen. Bewusst verschiedene Formen, nicht nur
  * Farben: benötigt = hohler Ring, Voraussetzung fehlt = roter Punkt,
- * verspätet (Rohstoffe) = gelbe Uhr.
+ * Rohstoffe fehlen = rote Münzen.
  */
 export function StatusDot({ kind }: { kind: StatusDotKind }) {
-  if (kind === "delayed") {
+  if (kind === "underfunded") {
     return (
-      <Clock3 aria-label="Start verspätet (Rohstoffe)" className="ml-1 inline-block size-3 shrink-0 align-[-2px] text-yellow-300">
-        <title>Start verspätet (Rohstoffe)</title>
-      </Clock3>
+      <Coins aria-label="Rohstoffe reichen nicht" className="ml-1 inline-block size-3 shrink-0 align-[-2px] text-destructive">
+        <title>Rohstoffe reichen nicht</title>
+      </Coins>
     );
   }
   return (

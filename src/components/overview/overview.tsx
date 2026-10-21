@@ -5,7 +5,7 @@ import { ResetPlanDialog, type ResetPlanSource } from "@/components/reset-plan-d
 import { TaxesDialog } from "@/components/taxes-dialog.tsx";
 import { ActionPlan } from "@/components/overview/actionplan.tsx";
 import { Protocol } from "@/components/overview/protocol.tsx";
-import { Timeline } from "@/components/overview/timeline.tsx";
+import { Timeline, type TimelineProps } from "@/components/overview/timeline.tsx";
 import { CircleDot, Crosshair, Link2, Unlink } from "lucide-react";
 import { Button } from "@/components/shadcn/button.tsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/shadcn/tooltip.tsx";
@@ -44,7 +44,7 @@ export type OverviewProps = {
   onInspectTick?: (tick: number) => void;
   /** Uhrzeit zu einem Tick, auch über das Simulationsende hinaus. */
   tickClock?: (tick: number) => string;
-};
+} & Pick<TimelineProps, "onMoveEntry" | "onDropItem" | "getEarliestTick">;
 
 export function Overview({
   actionTicks,
@@ -71,6 +71,9 @@ export function Overview({
   inspectTick = null,
   onInspectTick,
   tickClock,
+  onMoveEntry,
+  onDropItem,
+  getEarliestTick,
 }: OverviewProps) {
   const [tab, setTab] = useState<OverviewTab>("detailed");
   const historyStart = historyRangeStart(currentTick, historyWindow);
@@ -175,6 +178,9 @@ export function Overview({
             onEditJob={onEditJob}
             onInspectTick={onInspectTick}
             tickClock={tickClock}
+            onMoveEntry={onMoveEntry}
+            onDropItem={onDropItem}
+            getEarliestTick={getEarliestTick}
           />
         </div>
 

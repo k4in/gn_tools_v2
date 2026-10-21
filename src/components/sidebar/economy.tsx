@@ -41,6 +41,7 @@ export function Economy({
         <ul className="flex flex-col px-1.5">
           <SidebarRow
             onClick={() => onAddEconomy()}
+            drag={{ item: { kind: "economy" }, label: "Asteroiden & Extraktoren" }}
             titleClassName={jobTypeClass("economy")}
             title={
               <>
@@ -52,6 +53,7 @@ export function Economy({
           />
           <SidebarRow
             onClick={onAddAttack}
+            drag={{ item: { kind: "attack" }, label: "Angriffsflug" }}
             titleClassName={jobTypeClass("attack")}
             title={
               <>
@@ -63,6 +65,7 @@ export function Economy({
           />
           <SidebarRow
             onClick={onAddCatastrophe}
+            drag={{ item: { kind: "catastrophe" }, label: "Katastrophe" }}
             tone="destructive"
             titleClassName={jobTypeClass("catastrophe")}
             title="Katastrophe"
@@ -73,6 +76,7 @@ export function Economy({
         <ul className="flex flex-col px-1.5">
           <SidebarRow
             onClick={onAddTrade}
+            drag={{ item: { kind: "trade" }, label: "Trade" }}
             titleClassName={jobTypeClass("trade")}
             title={
               <>
@@ -84,6 +88,7 @@ export function Economy({
           />
           <SidebarRow
             onClick={onAddCustom}
+            drag={{ item: { kind: "custom" }, label: "Custom-Ausgabe" }}
             titleClassName={jobTypeClass("custom")}
             title="Custom-Ausgabe"
             meta="Beliebige Kosten mit eigenem Label"

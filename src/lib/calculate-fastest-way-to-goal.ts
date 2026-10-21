@@ -144,8 +144,8 @@ export type Job = {
   planEntryId?: string;
   /** Deps fehlen im Plan — Job wird trotzdem simuliert. */
   blocked?: boolean;
-  /** Start nach desiredTick, weil Rohstoffe nicht gereicht haben. */
-  delayed?: boolean;
+  /** Rohstoffe reichen am Start-Tick nicht; der Job wird trotzdem bezahlt und das Konto negativ. */
+  underfunded?: boolean;
   /**
    * Nur Angriffsflug: Kampfphase [startTick, endTick] für die Timeline; ab `roidStartTick`
    * wird geroidet (fehlt = kein Roid).
@@ -158,7 +158,7 @@ export type NamedJob = {
   type: JobKind;
   planEntryId?: string;
   cost?: Res;
-  delayed?: boolean;
+  underfunded?: boolean;
 };
 
 export type ActiveJob = NamedJob & {
@@ -205,11 +205,6 @@ export type PlanResult = {
   finishTick: number;
   steps: Job[];
   ticks: TickSnapshot[];
-  /** Tech-Namen im Plan (explizit). */
-  targetSet: string[];
-  /** Tech-Namen auf dem kritischen Pfad zum letzten Tech-Ziel. */
-  critical: Set<string>;
-  peakWaitTicks: number;
   finalRes: Res;
   start: StartConfig;
   asteroids: number;
@@ -302,26 +297,9 @@ function requiredClosure(goal: string, map: Map<string, TechTreeEntry>) {
   return needed;
 }
 
-function criticalPathTicks(name: string, map: Map<string, TechTreeEntry>, memo = new Map<string, number>()): number {
-  const cached = memo.get(name);
-  if (cached !== undefined) return cached;
-  const entry = map.get(name)!;
-  const depMax = entry.dependencies.length ? Math.max(...entry.dependencies.map((d) => criticalPathTicks(d, map, memo))) : 0;
-  const total = depMax + entry.ticks;
-  memo.set(name, total);
-  return total;
-}
-
-function criticalPathSet(goal: string, map: Map<string, TechTreeEntry>) {
-  const path = new Set<string>();
-  let current: string | undefined = goal;
-  while (current) {
-    path.add(current);
-    const entry: TechTreeEntry = map.get(current)!;
-    if (!entry.dependencies.length) break;
-    current = entry.dependencies.reduce((best, d) => (criticalPathTicks(d, map) > criticalPathTicks(best, map) ? d : best));
-  }
-  return path;
+/** Nach dem Bezahlen: Ein Rohstoff, den der Eintrag kostet, ist ins Minus gerutscht. */
+function isUnderfunded(res: Res, cost: Res) {
+  return (cost.met > 0 && res.met < 0) || (cost.kris > 0 && res.kris < 0);
 }
 
 export function incomeFrom(completed: Set<string>): Res {
@@ -1054,18 +1032,27 @@ function removeQueuedExtractors(queue: Array<"met" | "kris">, resource: "met" | 
 }
 
 /**
- * Plan-getriebene Simulation:
- * - Jeder Plan-Eintrag hat desired startTick (User-Input)
- * - Tatsächlicher Start: max(desired, earliest feasible) — nie früher als desired
- * - Ressourcenkonflikte: früherer Wunsch-Tick hat Vorrang; gleicher Tick → Plan-Reihenfolge
+ * Wie Einträge starten:
+ * - `fixed`: genau am `startTick`. Fehlende Rohstoffe werden trotzdem bezahlt, das Konto wird
+ *   negativ und der Job `underfunded`.
+ * - `legacy`: frühestens am `startTick`, sobald die Rohstoffe reichen (Plan-Version 1, nur für die Migration).
+ */
+type StartMode = "fixed" | "legacy";
+
+/**
+ * Plan-getriebene Simulation, Tick für Tick:
+ * - Jeder Plan-Eintrag startet an seinem `startTick` (siehe `StartMode`)
+ * - Gleicher Tick → Plan-Reihenfolge
  * - Unbegrenzt parallele Jobs
  */
-function simulatePlan(
+function runSimulation(
   plan: PlanEntry[],
   map: Map<string, TechTreeEntry>,
   startCfg: StartConfig,
-  currentTick: number
-): Omit<PlanResult, "start" | "critical"> {
+  currentTick: number,
+  mode: StartMode
+): Omit<PlanResult, "start"> {
+  const legacy = mode === "legacy";
   let res: Res = {
     met: startCfg.starting_resources.metall,
     kris: startCfg.starting_resources.kristall,
@@ -1076,8 +1063,6 @@ function simulatePlan(
   let active: Job[] = [];
   const steps: Job[] = [];
   const ticks: TickSnapshot[] = [];
-  let peakWaitTicks = 0;
-  let waitStreak = 0;
 
   let asteroids = 0;
   let extractorsMet = 0;
@@ -1389,6 +1374,11 @@ function simulatePlan(
     return started;
   }
 
+  /** Ob ein Eintrag mit diesen Kosten jetzt starten darf. Nur `legacy` wartet auf Rohstoffe. */
+  function mayStart(cost: Res) {
+    return !legacy || canAfford(res, cost);
+  }
+
   function tryStart(tick: number) {
     const startedJobs: NamedJob[] = [];
     const finishedJobs: NamedJob[] = [];
@@ -1414,7 +1404,7 @@ function simulatePlan(
         if (active.some((j) => j.name === entry.name)) continue;
         const tech = map.get(entry.name)!;
         const cost = { met: tech.cost.met, kris: tech.cost.kris };
-        if (!canAfford(res, cost)) continue;
+        if (!mayStart(cost)) continue;
 
         res = pay(res, cost);
         spent = addRes(spent, cost);
@@ -1426,7 +1416,7 @@ function simulatePlan(
           cost,
           planEntryId: entry.id,
           blocked: !isReady(entry.name),
-          delayed: tick > pending.desiredTick,
+          underfunded: isUnderfunded(res, cost),
         };
         active.push(job);
         steps.push(job);
@@ -1434,7 +1424,7 @@ function simulatePlan(
           name: entry.name,
           type: tech.type,
           planEntryId: entry.id,
-          delayed: job.delayed,
+          underfunded: job.underfunded,
         });
         markEntryStart(entry.id, tick);
         pendingTechs.delete(entry.name);
@@ -1454,7 +1444,7 @@ function simulatePlan(
           met: pending.unitCost.met * count,
           kris: pending.unitCost.kris * count,
         };
-        if (!canAfford(res, totalCost)) continue;
+        if (!mayStart(totalCost)) continue;
 
         res = pay(res, totalCost);
         spent = addRes(spent, totalCost);
@@ -1470,7 +1460,7 @@ function simulatePlan(
           cost: totalCost,
           planEntryId: entry.id,
           blocked: deps.some((d) => !completed.has(d)),
-          delayed: tick > pending.desiredTick,
+          underfunded: isUnderfunded(res, totalCost),
         };
         if (duration <= 0) {
           if (pending.type === "unit") completedUnits.add(pending.name);
@@ -1479,13 +1469,13 @@ function simulatePlan(
             name: label,
             type: pending.type,
             planEntryId: entry.id,
-            delayed: job.delayed,
+            underfunded: job.underfunded,
           });
           finishedJobs.push({
             name: label,
             type: pending.type,
             planEntryId: entry.id,
-            delayed: job.delayed,
+            underfunded: job.underfunded,
           });
         } else {
           active.push(job);
@@ -1494,7 +1484,7 @@ function simulatePlan(
             name: label,
             type: pending.type,
             planEntryId: entry.id,
-            delayed: job.delayed,
+            underfunded: job.underfunded,
           });
         }
         markEntryStart(entry.id, tick);
@@ -1516,7 +1506,7 @@ function simulatePlan(
 
         // Asteroids first so slots open for extractors in the same entry/tick.
         if (pending.remainingAsteroids > 0) {
-          while (pending.remainingAsteroids > 0 && canAfford(res, { met: 0, kris: ASTEROID_COST_KRIS })) {
+          while (pending.remainingAsteroids > 0 && mayStart({ met: 0, kris: ASTEROID_COST_KRIS })) {
             const cost = { met: 0, kris: ASTEROID_COST_KRIS };
             res = pay(res, cost);
             spent = addRes(spent, cost);
@@ -1533,9 +1523,10 @@ function simulatePlan(
               cost,
               planEntryId: entry.id,
               blocked: !completed.has("Observatorium"),
+              underfunded: isUnderfunded(res, cost),
             };
             steps.push(job);
-            startedJobs.push({ name, type: "economy", planEntryId: entry.id });
+            startedJobs.push({ name, type: "economy", planEntryId: entry.id, underfunded: job.underfunded });
             finishedJobs.push({ name, type: "economy", planEntryId: entry.id });
             markEntryStart(entry.id, tick);
           }
@@ -1546,7 +1537,7 @@ function simulatePlan(
           while (economy[remainingKey] > 0) {
             const nextIndex = totalExtractors() + 1;
             const cost = { met: extractorUnitCost(nextIndex), kris: 0 };
-            if (!canAfford(res, cost)) break;
+            if (!mayStart(cost)) break;
             res = pay(res, cost);
             spent = addRes(spent, cost);
             if (resource === "met") extractorsMet += 1;
@@ -1564,9 +1555,10 @@ function simulatePlan(
               cost,
               planEntryId: entry.id,
               blocked: !completed.has("Extraktor"),
+              underfunded: isUnderfunded(res, cost),
             };
             steps.push(job);
-            startedJobs.push({ name: label, type: "economy", planEntryId: entry.id });
+            startedJobs.push({ name: label, type: "economy", planEntryId: entry.id, underfunded: job.underfunded });
             finishedJobs.push({ name: label, type: "economy", planEntryId: entry.id });
             markEntryStart(entry.id, tick);
           }
@@ -1585,7 +1577,7 @@ function simulatePlan(
         if (!pending || pending.done) continue;
         if (tick < pending.desiredTick) continue;
         const have = pending.give === "met" ? res.met : res.kris;
-        if (have < pending.giveAmount) continue;
+        if (legacy && have < pending.giveAmount) continue;
 
         if (pending.give === "met") {
           res = { met: res.met - pending.giveAmount, kris: res.kris + pending.receiveAmount };
@@ -1606,7 +1598,7 @@ function simulatePlan(
           cost,
           planEntryId: entry.id,
           blocked: !completed.has("Interstellarer Handel"),
-          delayed: tick > pending.desiredTick,
+          underfunded: (pending.give === "met" ? res.met : res.kris) < 0,
         };
         steps.push(job);
         startedJobs.push({
@@ -1614,14 +1606,14 @@ function simulatePlan(
           type: "trade",
           planEntryId: entry.id,
           cost,
-          delayed: job.delayed,
+          underfunded: job.underfunded,
         });
         finishedJobs.push({
           name,
           type: "trade",
           planEntryId: entry.id,
           cost,
-          delayed: job.delayed,
+          underfunded: job.underfunded,
         });
         markEntryStart(entry.id, tick);
         markEntryFinish(entry.id, tick);
@@ -1633,7 +1625,7 @@ function simulatePlan(
         const pending = pendingCustomById.get(entry.id);
         if (!pending || pending.done) continue;
         if (tick < pending.desiredTick) continue;
-        if (!canAfford(res, pending.cost)) continue;
+        if (!mayStart(pending.cost)) continue;
 
         res = pay(res, pending.cost);
         spent = addRes(spent, pending.cost);
@@ -1644,7 +1636,7 @@ function simulatePlan(
           endTick: tick,
           cost: pending.cost,
           planEntryId: entry.id,
-          delayed: tick > pending.desiredTick,
+          underfunded: isUnderfunded(res, pending.cost),
         };
         steps.push(job);
         startedJobs.push({
@@ -1652,7 +1644,7 @@ function simulatePlan(
           type: "custom",
           planEntryId: entry.id,
           cost: pending.cost,
-          delayed: job.delayed,
+          underfunded: job.underfunded,
         });
         finishedJobs.push({
           name: pending.label,
@@ -1686,7 +1678,6 @@ function simulatePlan(
             cost: { met: 0, kris: 0 },
             planEntryId: entry.id,
             blocked: !completed.has("Marineakademie") || !completedUnits.has("Cleptor"),
-            delayed: tick > pending.desiredTick,
           });
           markEntryStart(entry.id, tick);
           if (firstRoidStartTick === null) firstRoidStartTick = tick;
@@ -1731,13 +1722,11 @@ function simulatePlan(
             endTick: pending.desiredTick + pending.duration,
             cost: { met: 0, kris: 0 },
             planEntryId: entry.id,
-            delayed: tick > pending.desiredTick,
           });
           startedJobs.push({
             name,
             type: "catastrophe",
             planEntryId: entry.id,
-            delayed: tick > pending.desiredTick,
           });
           markEntryStart(entry.id, tick);
         }
@@ -1851,7 +1840,7 @@ function simulatePlan(
           type: j.type,
           remainingTicks: Math.max(0, j.endTick - tick),
           planEntryId: j.planEntryId,
-          delayed: j.delayed,
+          underfunded: j.underfunded,
         }))
         .sort((a, b) => a.remainingTicks - b.remainingTicks || a.name.localeCompare(b.name)),
       started,
@@ -1907,8 +1896,6 @@ function simulatePlan(
       finishTick,
       steps: [...steps, ...attackSteps()],
       ticks,
-      targetSet: techEntries.map((e) => e.name),
-      peakWaitTicks,
       finalRes: res,
       asteroids,
       extractorsMet,
@@ -2033,14 +2020,6 @@ function simulatePlan(
 
     // Nach Planende bleibt alles erledigt, die Prüfung ist dann überflüssig.
     const planDone = doneTick !== null || allDone();
-    const waiting = !planDone && startedJobs.length === 0 && active.length === 0 && roidLoot.length === 0 && catastropheLoss.length === 0;
-
-    if (waiting) {
-      waitStreak += 1;
-      peakWaitTicks = Math.max(peakWaitTicks, waitStreak);
-    } else {
-      waitStreak = 0;
-    }
 
     const delta: Res = {
       met: income.met + questRes.met - spent.met,
@@ -2053,50 +2032,7 @@ function simulatePlan(
       doneTick = Math.max(0, ...Object.values(entryFinishTicks), ...steps.map((s) => s.endTick), t);
       endTick = forecastEndTick(doneTick);
     }
-    if (doneTick !== null && endTick !== null) {
-      if (t >= endTick) return resultAt(doneTick);
-      continue;
-    }
-
-    // Deadlock detection
-    if (active.length === 0 && income.met === 0 && income.kris === 0 && startedJobs.length === 0) {
-      const stuckTech = [...pendingTechs.entries()].some(([name, pending]) => {
-        if (t < pending.desiredTick) return false;
-        const c = map.get(name)!.cost;
-        return !canAfford(res, { met: c.met, kris: c.kris });
-      });
-      const stuckEco = pendingEconomy.some((p) => {
-        if (t < p.desiredTick) return false;
-        const stuckAst = p.remainingAsteroids > 0 && res.kris < ASTEROID_COST_KRIS;
-        const stuckExt =
-          (p.remainingExtractorsMet > 0 || p.remainingExtractorsKris > 0) && res.met < extractorUnitCost(totalExtractors() + 1);
-        return stuckAst || stuckExt;
-      });
-      const hasPendingEco = pendingEconomy.some(
-        (p) => p.remainingAsteroids > 0 || p.remainingExtractorsMet > 0 || p.remainingExtractorsKris > 0
-      );
-      const hasPendingCustom = pendingCustom.some((p) => !p.done);
-      const stuckCustom = pendingCustom.some((p) => {
-        if (p.done || t < p.desiredTick) return false;
-        return !canAfford(res, p.cost);
-      });
-      const hasPendingTrade = pendingTrades.some((p) => !p.done);
-      const stuckTrade = pendingTrades.some((p) => {
-        if (p.done || t < p.desiredTick) return false;
-        const have = p.give === "met" ? res.met : res.kris;
-        return have < p.giveAmount;
-      });
-      if (
-        (pendingTechs.size > 0 || pendingUnits.some((u) => u.remaining > 0) || hasPendingEco || hasPendingCustom || hasPendingTrade) &&
-        (stuckTech || stuckEco || stuckCustom || stuckTrade || pendingUnits.some((u) => u.remaining > 0))
-      ) {
-        // If purely waiting for income that will never come
-        const anyFutureIncome = [...completed].some((n) => INCOME_BY_BUILDING[n]) || slottedStats().unslotted < extractorQueue.length;
-        if (!anyFutureIncome) {
-          throw new Error(`Plan nicht erreichbar: keine Produktion und unzureichende Ressourcen bei Tick ${t}`);
-        }
-      }
-    }
+    if (doneTick !== null && endTick !== null && t >= endTick) return resultAt(doneTick);
   }
 
   throw new Error(`Plan nicht in ${maxTicks} Ticks abgeschlossen`);
@@ -2112,11 +2048,11 @@ const planCache = new WeakMap<StartConfig, Map<number, PlanOutcome>>();
 const PLAN_CACHE_TICKS_PER_CONFIG = 4;
 
 /**
- * Berechnet den Zeitplan anhand der Plan-Einträge (desired startTick als Priorität).
- * Simuliert wird bis max(aktueller Tick, Planende inkl. Angriffsflüge) + FORECAST_TICKS.
- * Das Ergebnis wird gecacht und geteilt, es darf nicht verändert werden.
+ * Simuliert den Plan: Jeder Eintrag startet genau an seinem `startTick`, fehlende Rohstoffe
+ * machen das Konto negativ (`underfunded`). Simuliert wird bis max(aktueller Tick, Planende inkl.
+ * Angriffsflüge) + FORECAST_TICKS. Das Ergebnis wird gecacht und geteilt, es darf nicht verändert werden.
  */
-export function calculateFastestWayToGoal(startCfg: StartConfig, currentTick = computeCurrentTick(startCfg)): PlanResult {
+export function simulatePlan(startCfg: StartConfig, currentTick = computeCurrentTick(startCfg)): PlanResult {
   let byTick = planCache.get(startCfg);
   if (!byTick) {
     byTick = new Map();
@@ -2125,7 +2061,7 @@ export function calculateFastestWayToGoal(startCfg: StartConfig, currentTick = c
   let outcome = byTick.get(currentTick);
   if (!outcome) {
     try {
-      outcome = { ok: true, result: computePlan(startCfg, currentTick) };
+      outcome = { ok: true, result: computePlan(startCfg, currentTick, "fixed") };
     } catch (error) {
       outcome = { ok: false, error };
     }
@@ -2139,7 +2075,7 @@ export function calculateFastestWayToGoal(startCfg: StartConfig, currentTick = c
   return outcome.result;
 }
 
-function computePlan(startCfg: StartConfig, currentTick: number): PlanResult {
+function computePlan(startCfg: StartConfig, currentTick: number, mode: StartMode): PlanResult {
   const map = byName(techtree);
   const plan =
     startCfg.plan.length > 0
@@ -2153,13 +2089,7 @@ function computePlan(startCfg: StartConfig, currentTick: number): PlanResult {
           },
         ];
 
-  const lastTech = [...plan].reverse().find((s) => s.kind === "tech");
-  const critical = lastTech ? criticalPathSet(lastTech.name, map) : new Set<string>();
-
-  const sim = simulatePlan(plan, map, { ...startCfg, plan }, currentTick);
-
-  // Fix goal label (ternary precedence bug-safe)
-  const goal = lastTech?.name ?? (plan.length ? formatPlanEntryLabel(plan[plan.length - 1]!) : "Koloniezentrum");
+  const sim = runSimulation(plan, map, { ...startCfg, plan }, currentTick, mode);
 
   return {
     ...sim,
@@ -2167,57 +2097,40 @@ function computePlan(startCfg: StartConfig, currentTick: number): PlanResult {
     steps: startCfg.ignore_non_tech_deps
       ? sim.steps.map((s) => (s.blocked && s.type !== "building" && s.type !== "research" ? { ...s, blocked: false } : s))
       : sim.steps,
-    goal,
-    critical,
     start: { ...startCfg, plan },
   };
 }
 
+/** Einträge, die in Plan-Version 1 auf Rohstoffe gewartet haben; alle anderen liefen schon immer zum `startTick`. */
+const LEGACY_DELAYABLE_KINDS = new Set<PlanEntry["kind"]>([
+  "tech",
+  "unit",
+  "recon",
+  "economy",
+  "asteroids",
+  "extractors",
+  "custom",
+  "trade",
+]);
+
 /**
- * Frühester Tick, an dem eine Tech starten könnte (Deps fertig + Ressourcen),
- * basierend auf der Simulation des aktuellen Plans. Nie kleiner als 0.
+ * Migriert einen Plan der Version 1 (Einträge warten auf Rohstoffe) auf feste Start-Ticks: Jeder
+ * Eintrag bekommt den Tick, an dem er bisher tatsächlich gestartet ist. Ist der alte Plan nicht
+ * simulierbar, bleiben die Einträge unverändert.
  */
-export function getEarliestTechStartTick(startCfg: StartConfig, techName: string): number {
-  const map = byName();
-  const tech = map.get(techName);
-  if (!tech) return 0;
-
-  let plan: PlanResult;
+export function migrateLegacyStartTicks(startCfg: StartConfig): PlanEntry[] {
+  if (startCfg.plan.length === 0) return startCfg.plan;
+  let actualStart: Record<string, number>;
   try {
-    plan = calculateFastestWayToGoal(startCfg);
+    actualStart = computePlan(startCfg, 0, "legacy").entryActualStart;
   } catch {
-    return 0;
+    return startCfg.plan;
   }
-
-  // Deps ready: max endTick of dependency jobs (or 0 if none)
-  let depsReady = 0;
-  for (const dep of tech.dependencies) {
-    const job = plan.steps.find((s) => s.name === dep);
-    if (job) depsReady = Math.max(depsReady, job.endTick);
-    else if (!startCfg.plan.some((e) => e.kind === "tech" && e.name === dep)) {
-      // dep not in plan — shouldn't happen for unlocked techs
-      depsReady = Math.max(depsReady, 0);
-    }
-  }
-
-  const cost = { met: tech.cost.met, kris: tech.cost.kris };
-  for (const snap of plan.ticks) {
-    if (snap.tick < depsReady) continue;
-    if (snap.met >= cost.met && snap.kris >= cost.kris) return snap.tick;
-  }
-
-  // Project beyond plan end with steady income from completed mines + extractors
-  const last = plan.ticks[plan.ticks.length - 1];
-  const steady = last ? estimateSteadyIncome(plan) : { met: 0, kris: 0 };
-  let met = plan.finalRes.met;
-  let kris = plan.finalRes.kris;
-  for (let t = (last?.tick ?? 0) + 1; t <= maxTicksOf(startCfg); t++) {
-    const net = taxedIncome(steady, startCfg.taxes, t);
-    met += net.met;
-    kris += net.kris;
-    if (met >= cost.met && kris >= cost.kris) return Math.max(t, depsReady);
-  }
-  return depsReady;
+  return startCfg.plan.map((entry) => {
+    const tick = actualStart[entry.id];
+    if (!LEGACY_DELAYABLE_KINDS.has(entry.kind) || tick === undefined || tick === entry.startTick) return entry;
+    return { ...entry, startTick: tick };
+  });
 }
 
 function estimateSteadyIncome(plan: PlanResult): Res {
@@ -2234,79 +2147,135 @@ function estimateSteadyIncome(plan: PlanResult): Res {
   };
 }
 
+const spendableCache = new WeakMap<PlanResult, Res[]>();
+
 /**
- * Frühester sinnvoller Tick für Unit/Recon (Deps fertig + mind. 1 Stück finanzierbar).
+ * Pro Snapshot: niedrigster Kontostand ab diesem Tick bis vor den nächsten manuellen Stand.
+ * So viel kann ein neuer Eintrag an diesem Tick ausgeben, ohne spätere Einträge ins Minus zu ziehen.
  */
-export function getEarliestBuildStartTick(startCfg: StartConfig, kind: "unit" | "recon", name: string): number {
-  const item = kind === "unit" ? unitByName(name) : reconByName(name);
-  if (!item) return 0;
-
-  let plan: PlanResult;
-  try {
-    plan = calculateFastestWayToGoal(startCfg);
-  } catch {
-    return 0;
+function spendableByIndex(plan: PlanResult): Res[] {
+  const cached = spendableCache.get(plan);
+  if (cached) return cached;
+  const out: Res[] = new Array<Res>(plan.ticks.length);
+  for (let i = plan.ticks.length - 1; i >= 0; i--) {
+    const snap = plan.ticks[i]!;
+    const next = i + 1 < plan.ticks.length ? plan.ticks[i + 1]! : null;
+    const nextResets = !next || next.started.some((job) => job.type === "snapshot");
+    out[i] = nextResets
+      ? { met: snap.met, kris: snap.kris }
+      : { met: Math.min(snap.met, out[i + 1]!.met), kris: Math.min(snap.kris, out[i + 1]!.kris) };
   }
+  spendableCache.set(plan, out);
+  return out;
+}
 
-  let depsReady = 0;
-  for (const dep of item.dependencies) {
-    const job = plan.steps.find((s) => s.name === dep);
-    if (job) depsReady = Math.max(depsReady, job.endTick);
+/** Index des letzten Snapshots mit `tick <= tick`, oder -1. */
+function snapshotIndexAt(plan: PlanResult, tick: number): number {
+  let lo = 0;
+  let hi = plan.ticks.length - 1;
+  let found = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (plan.ticks[mid]!.tick <= tick) {
+      found = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
   }
+  return found;
+}
 
-  const cost = { met: item.cost.met, kris: item.cost.kris };
-  for (const snap of plan.ticks) {
-    if (snap.tick < depsReady) continue;
-    if (snap.met >= cost.met && snap.kris >= cost.kris) return snap.tick;
+function spendableAt(plan: PlanResult, startCfg: StartConfig, tick: number): Res {
+  const index = snapshotIndexAt(plan, tick);
+  const last = plan.ticks.at(-1);
+  if (index < 0 || !last) return { met: plan.finalRes.met, kris: plan.finalRes.kris };
+  if (tick > last.tick) {
+    // Nach dem Simulationsende wächst das Konto nur noch.
+    return projectWithIncome(plan.finalRes, last.tick, tick, estimateSteadyIncome(plan), startCfg.taxes);
   }
+  return spendableByIndex(plan)[index]!;
+}
 
+/** Frühester Tick ab `notBefore`, an dem `cost` ausgegeben werden kann, ohne dass das Konto später negativ wird. */
+function earliestSpendableTick(plan: PlanResult, startCfg: StartConfig, cost: Res, notBefore: number): number {
+  const spendable = spendableByIndex(plan);
+  for (let i = Math.max(0, snapshotIndexAt(plan, notBefore)); i < plan.ticks.length; i++) {
+    const tick = plan.ticks[i]!.tick;
+    if (tick < notBefore) continue;
+    if (canAfford(spendable[i]!, cost)) return tick;
+  }
+  const last = plan.ticks.at(-1);
   const steady = estimateSteadyIncome(plan);
   let met = plan.finalRes.met;
   let kris = plan.finalRes.kris;
-  const lastTick = plan.ticks[plan.ticks.length - 1]?.tick ?? 0;
-  for (let t = lastTick + 1; t <= maxTicksOf(startCfg); t++) {
+  for (let t = (last?.tick ?? 0) + 1; t <= maxTicksOf(startCfg); t++) {
     const net = taxedIncome(steady, startCfg.taxes, t);
     met += net.met;
     kris += net.kris;
-    if (met >= cost.met && kris >= cost.kris) return Math.max(t, depsReady);
+    if (t >= notBefore && met >= cost.met && kris >= cost.kris) return t;
   }
-  return depsReady;
+  return notBefore;
+}
+
+/** Tick, an dem alle genannten Techs laut Simulation fertig sind (0, wenn keine davon im Plan ist). */
+function dependenciesReadyTick(plan: PlanResult, dependencies: string[]): number {
+  let ready = 0;
+  for (const dep of dependencies) {
+    const job = plan.steps.find((s) => s.name === dep);
+    if (job) ready = Math.max(ready, job.endTick);
+  }
+  return ready;
 }
 
 /**
- * Max. Anzahl Units/Recon, die am gegebenen Tick mit Snapshot-Ressourcen
- * (nach bestehenden Plan-Ausgaben) finanzierbar sind.
+ * Frühester Tick, an dem eine Tech starten kann: Voraussetzungen fertig und die Kosten
+ * bezahlbar, ohne dass spätere Einträge ins Minus rutschen. Nie kleiner als 0.
  */
+export function getEarliestTechStartTick(startCfg: StartConfig, techName: string): number {
+  const tech = byName().get(techName);
+  if (!tech) return 0;
+  let plan: PlanResult;
+  try {
+    plan = simulatePlan(startCfg);
+  } catch {
+    return 0;
+  }
+  return earliestSpendableTick(plan, startCfg, tech.cost, dependenciesReadyTick(plan, tech.dependencies));
+}
+
+/** Frühester Tick für Unit/Recon: Voraussetzungen fertig und mind. 1 Stück bezahlbar (siehe oben). */
+export function getEarliestBuildStartTick(startCfg: StartConfig, kind: "unit" | "recon", name: string): number {
+  const item = kind === "unit" ? unitByName(name) : reconByName(name);
+  if (!item) return 0;
+  let plan: PlanResult;
+  try {
+    plan = simulatePlan(startCfg);
+  } catch {
+    return 0;
+  }
+  return earliestSpendableTick(plan, startCfg, item.cost, dependenciesReadyTick(plan, item.dependencies));
+}
+
+/**
+ * Rohstoffe, die an einem Tick zusätzlich ausgegeben werden können, ohne dass das Konto
+ * danach negativ wird (bis zum nächsten manuellen Stand).
+ */
+export function getSpendableResourcesAtTick(startCfg: StartConfig, tick: number): Res {
+  try {
+    return spendableAt(simulatePlan(startCfg), startCfg, tick);
+  } catch {
+    return { met: startCfg.starting_resources.metall, kris: startCfg.starting_resources.kristall };
+  }
+}
+
+/** Max. Anzahl Units/Recon, die am Tick bezahlbar sind, ohne das Konto später ins Minus zu ziehen. */
 export function getMaxBuildCountAtTick(startCfg: StartConfig, kind: "unit" | "recon", name: string, tick: number): number {
   const item = kind === "unit" ? unitByName(name) : reconByName(name);
   if (!item) return 0;
   const cost = item.cost;
   if (cost.met <= 0 && cost.kris <= 0) return 99;
-
-  let plan: PlanResult;
-  try {
-    plan = calculateFastestWayToGoal(startCfg);
-  } catch {
-    return 0;
-  }
-
-  const snap = plan.ticks.find((t) => t.tick === tick) ?? plan.ticks.filter((t) => t.tick <= tick).at(-1) ?? null;
-
-  let met = snap?.met ?? plan.finalRes.met;
-  let kris = snap?.kris ?? plan.finalRes.kris;
-
-  // If tick is beyond simulation, project income
-  if (snap && snap.tick < tick) {
-    const projected = projectWithIncome({ met, kris }, snap.tick, tick, estimateSteadyIncome(plan), startCfg.taxes);
-    met = projected.met;
-    kris = projected.kris;
-  } else if (!snap) {
-    const last = plan.ticks[plan.ticks.length - 1]?.tick ?? 0;
-    const projected = projectWithIncome(plan.finalRes, last, tick, estimateSteadyIncome(plan), startCfg.taxes);
-    met = projected.met;
-    kris = projected.kris;
-  }
-
+  const { met, kris } = getSpendableResourcesAtTick(startCfg, tick);
   const byMet = cost.met > 0 ? met / cost.met : Infinity;
   const byKris = cost.kris > 0 ? kris / cost.kris : Infinity;
   return Math.max(0, Math.floor(Math.min(byMet, byKris)));
@@ -2321,7 +2290,7 @@ export function getResourcesAtTick(
 ): { met: number; kris: number; asteroids: number; extractorsMet: number; extractorsKris: number } {
   let plan: PlanResult;
   try {
-    plan = calculateFastestWayToGoal(startCfg);
+    plan = simulatePlan(startCfg);
   } catch {
     return {
       met: startCfg.starting_resources.metall,
@@ -2371,12 +2340,13 @@ export function getMaxExtractorsAtTick(
   tick: number
 ): { max: number; freeSlots: number; asteroids: number; alreadyBuilt: number } {
   const r = getResourcesAtTick(startCfg, tick);
+  const spendable = getSpendableResourcesAtTick(startCfg, tick);
   const alreadyBuilt = r.extractorsMet + r.extractorsKris;
   const slots = r.asteroids * EXTRACTOR_SLOT_PER_ASTEROID;
   const freeSlots = Math.max(0, slots - alreadyBuilt);
   const maxByRes = maxAffordableExtractors({
-    met: r.met,
-    kris: r.kris,
+    met: spendable.met,
+    kris: spendable.kris,
     alreadyBuilt,
     asteroids: r.asteroids,
     slots,
@@ -2393,7 +2363,7 @@ export function getMaxExtractorsAtTick(
 export function getEarliestExtractorStartTick(startCfg: StartConfig): number {
   let plan: PlanResult;
   try {
-    plan = calculateFastestWayToGoal(startCfg);
+    plan = simulatePlan(startCfg);
   } catch {
     return 0;
   }
@@ -2404,13 +2374,10 @@ export function getEarliestExtractorStartTick(startCfg: StartConfig): number {
 export function getEarliestAsteroidStartTick(startCfg: StartConfig): number {
   let plan: PlanResult;
   try {
-    plan = calculateFastestWayToGoal(startCfg);
+    plan = simulatePlan(startCfg);
   } catch {
     return 0;
   }
   const job = plan.steps.find((s) => s.name === "Observatorium");
   return job?.endTick ?? 0;
 }
-
-/** @deprecated use calculateFastestWayToGoal */
-export const planFastestToGoal = calculateFastestWayToGoal;

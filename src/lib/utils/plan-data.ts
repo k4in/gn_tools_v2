@@ -1,11 +1,13 @@
 import { type FunctionReturnType } from "convex/server";
 
 import { type api } from "@convex/_generated/api.ts";
+import { CURRENT_PLAN_VERSION } from "@convex/lib/validators.ts";
 
 import { defaults, type PlanEntry } from "@/lib/gn-data/plan.ts";
 import {
   clampAttackDuration,
   clampAttackRoidDuration,
+  migrateLegacyStartTicks,
   newPlanEntryId,
   normalizeRoidMulti,
   normalizeTaxes,
@@ -195,6 +197,8 @@ function parsePlanSettings(raw: unknown, fallback: PlanSettings): PlanSettings {
 
 export type ImportedPlan = {
   entries: StoredPlanEntry[];
+  /** Fehlt in Exporten von vor Version 2: dann müssen die Einträge migriert werden. */
+  planVersion?: number;
   taxes: TaxSegment[];
   /** Fehlt in Legacy-Exporten: dann bleibt der Wert des Slots. */
   ignoreNonTechDeps?: boolean;
@@ -238,6 +242,7 @@ export function parseImportedPlan(text: string, currentSettings: PlanSettings): 
   return {
     ok: true,
     entries,
+    ...(isFiniteNumber(obj?.planVersion) ? { planVersion: obj.planVersion } : {}),
     taxes: normalizeTaxes(obj?.taxes),
     ...(typeof obj?.ignoreNonTechDeps === "boolean" ? { ignoreNonTechDeps: obj.ignoreNonTechDeps } : {}),
     ...(obj?.settings !== undefined ? { settings: parsePlanSettings(obj.settings, currentSettings) } : {}),
@@ -249,6 +254,7 @@ export function planExportJson(plan: StoredPlan): string {
   return JSON.stringify(
     {
       plan: plan.entries,
+      planVersion: plan.planVersion,
       taxes: plan.taxes,
       ignoreNonTechDeps: plan.ignoreNonTechDeps,
       settings: plan.settings,
@@ -266,8 +272,21 @@ export function localDateKey(date: Date): string {
   return `${y}-${m}-${d}`;
 }
 
-/** Rechen-Config eines Slots. Ohne Startdatum ist Tick 0 heute (`today`) um 00:00. */
+/** Ob die Einträge noch die Semantik von Plan-Version 1 haben (Start wartet auf Rohstoffe). */
+export function needsPlanMigration(plan: Pick<StoredPlan, "planVersion">): boolean {
+  return (plan.planVersion ?? 1) < CURRENT_PLAN_VERSION;
+}
+
+/**
+ * Rechen-Config eines Slots. Ohne Startdatum ist Tick 0 heute (`today`) um 00:00.
+ * Pläne alter Versionen werden dabei migriert; der Planer speichert das Ergebnis einmalig.
+ */
 export function configFromPlan(plan: StoredPlan, today: string): StartConfig {
+  const cfg = rawConfigFromPlan(plan, today);
+  return needsPlanMigration(plan) ? { ...cfg, plan: migrateLegacyStartTicks(cfg) } : cfg;
+}
+
+function rawConfigFromPlan(plan: StoredPlan, today: string): StartConfig {
   const { startDate, startTime, tickMinutes } = plan.settings;
   return {
     start_date: startDate ?? today,

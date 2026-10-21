@@ -1,5 +1,7 @@
 import { type ReactNode } from "react";
-import { Plus } from "lucide-react";
+import { useDraggable } from "@dnd-kit/react";
+import { GripVertical, Plus } from "lucide-react";
+import { type NewPlanItem, type PlanDragData } from "@/types/plan-drag.ts";
 import { cn } from "@/lib/utils/cn.ts";
 
 export function SidebarSectionLabel({ children }: { children: ReactNode }) {
@@ -11,14 +13,26 @@ export type SidebarRowProps = {
   meta?: ReactNode;
   titleClassName?: string;
   tone?: "default" | "destructive";
+  /** Eintrag, der beim Ziehen in die Timeline angelegt wird; `label` erscheint am Mauszeiger. */
+  drag: { item: NewPlanItem; label: string };
   onClick: () => void;
 };
 
-/** Eine klickbare Zeile, die einen Eintrag zum Plan hinzufügt. */
-export function SidebarRow({ title, meta, titleClassName, tone = "default", onClick }: SidebarRowProps) {
+function dragId(item: NewPlanItem) {
+  return "name" in item ? `sidebar:${item.kind}:${item.name}` : `sidebar:${item.kind}`;
+}
+
+/** Eine Zeile, die per Klick (Dialog) oder per Ziehen in die Timeline einen Eintrag zum Plan hinzufügt. */
+export function SidebarRow({ title, meta, titleClassName, tone = "default", drag, onClick }: SidebarRowProps) {
+  const { ref } = useDraggable<PlanDragData>({
+    id: dragId(drag.item),
+    data: { source: "sidebar", item: drag.item, label: drag.label },
+  });
+
   return (
     <li>
       <button
+        ref={ref}
         type="button"
         onClick={onClick}
         className={cn(
@@ -30,6 +44,10 @@ export function SidebarRow({ title, meta, titleClassName, tone = "default", onCl
           <span className={cn("block truncate text-xs leading-5", titleClassName)}>{title}</span>
           {meta ? <span className="block truncate text-[11px] leading-4 text-muted-foreground tabular-nums">{meta}</span> : null}
         </span>
+        <GripVertical
+          aria-hidden
+          className="size-3.5 shrink-0 text-transparent transition-colors group-hover/row:text-muted-foreground/60"
+        />
         <Plus
           aria-hidden
           className="size-3.5 shrink-0 text-muted-foreground/40 transition-colors group-hover/row:text-foreground group-focus-visible/row:text-foreground"

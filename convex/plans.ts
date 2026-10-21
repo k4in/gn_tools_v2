@@ -15,7 +15,14 @@ export const list = query({
       .query("plans")
       .withIndex("by_user_slot", (q) => q.eq("userId", user._id))
       .collect();
-    return plans.map(({ slot, entries, taxes, ignoreNonTechDeps, settings }) => ({ slot, entries, taxes, ignoreNonTechDeps, settings }));
+    return plans.map(({ slot, entries, planVersion, taxes, ignoreNonTechDeps, settings }) => ({
+      slot,
+      entries,
+      planVersion,
+      taxes,
+      ignoreNonTechDeps,
+      settings,
+    }));
   },
 });
 
@@ -25,12 +32,13 @@ export const update = mutation({
     key: v.string(),
     slot: planSlotValidator,
     entries: v.optional(v.array(planEntryValidator)),
+    planVersion: v.optional(v.number()),
     taxes: v.optional(v.array(taxSegmentValidator)),
     ignoreNonTechDeps: v.optional(v.boolean()),
     settings: v.optional(planSettingsValidator),
   },
   returns: v.null(),
-  handler: async (ctx, { key, slot, entries, taxes, ignoreNonTechDeps, settings }) => {
+  handler: async (ctx, { key, slot, entries, planVersion, taxes, ignoreNonTechDeps, settings }) => {
     const user = await requireUserByKey(ctx, key);
     const plan = await ctx.db
       .query("plans")
@@ -46,6 +54,7 @@ export const update = mutation({
 
     await ctx.db.patch(plan._id, {
       ...(entries ? { entries } : {}),
+      ...(planVersion !== undefined ? { planVersion } : {}),
       ...(taxes ? { taxes } : {}),
       ...(ignoreNonTechDeps !== undefined ? { ignoreNonTechDeps } : {}),
       ...(settings ? { settings } : {}),

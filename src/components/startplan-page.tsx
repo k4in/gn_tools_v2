@@ -2,10 +2,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 // Packages
+import { PointerActivationConstraints, type Draggable } from "@dnd-kit/dom";
+import { DragDropProvider, DragOverlay, PointerSensor } from "@dnd-kit/react";
 import { useQuery } from "convex/react";
 
 // Convex
 import { api } from "@convex/_generated/api.ts";
+import { CURRENT_PLAN_VERSION } from "@convex/lib/validators.ts";
+
+// Types
+import { type NewPlanItem, type PlanDragData } from "@/types/plan-drag.ts";
 
 // Lib/Utils
 import {
@@ -22,7 +28,6 @@ import {
   attackRoidStartTick,
   clampAttackDuration,
   byName,
-  calculateFastestWayToGoal,
   clampAttackRoidDuration,
   clockLabel,
   computeCurrentTick,
@@ -39,17 +44,20 @@ import {
   getReconItems,
   getResourcesAtTick,
   getShips,
+  getSpendableResourcesAtTick,
   hasTechInPlan,
   missingRequiredTechs,
   newPlanEntryId,
   reconByName,
   removePlanEntryCascade,
+  simulatePlan,
   unitByName,
   type StartConfig,
 } from "@/lib/calculate-fastest-way-to-goal.ts";
 import {
   configFromPlan,
   localDateKey,
+  needsPlanMigration,
   parseImportedPlan,
   planExportJson,
   toStoredEntries,
@@ -88,6 +96,20 @@ function logMutationError(error: unknown) {
   console.error("Konnte Plan nicht speichern", error);
 }
 
+/** Maus: Ziehen erst ab 5 px, sonst bleibt es ein Klick. Touch: lange drücken, damit Scrollen geht. */
+const DRAG_SENSORS = [
+  PointerSensor.configure({
+    activationConstraints: (event) =>
+      event.pointerType === "touch"
+        ? [new PointerActivationConstraints.Delay({ value: 250, tolerance: 5 })]
+        : [new PointerActivationConstraints.Distance({ value: 5 })],
+  }),
+];
+
+function isSidebarDrag(source: Draggable<PlanDragData> | null) {
+  return source?.data.source === "sidebar";
+}
+
 /** Lädt die Plan-Slots des eingeloggten Nutzers aus Convex. */
 export function StartplanPage() {
   const { userKey } = useUserKey();
@@ -123,9 +145,25 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
       key: userKey,
       slot: viewId,
       ...rest,
-      ...(entries ? { entries: toStoredEntries(entries) } : {}),
+      // Einträge kommen immer aus einer (ggf. migrierten) Config und haben damit die aktuelle Semantik.
+      ...(entries ? { entries: toStoredEntries(entries), planVersion: CURRENT_PLAN_VERSION } : {}),
     }).catch(logMutationError);
   }
+
+  // Pläne alter Versionen einmalig mit festen Start-Ticks speichern (alle Slots, nicht nur der angezeigte).
+  const migratingSlotsRef = useRef(new Set<PlanSlotId>());
+  useEffect(() => {
+    for (const stored of plans) {
+      if (!needsPlanMigration(stored) || migratingSlotsRef.current.has(stored.slot)) continue;
+      migratingSlotsRef.current.add(stored.slot);
+      void updatePlan({
+        key: userKey,
+        slot: stored.slot,
+        entries: toStoredEntries(configFromPlan(stored, today).plan),
+        planVersion: CURRENT_PLAN_VERSION,
+      }).catch(logMutationError);
+    }
+  }, [plans, today, updatePlan, userKey]);
 
   function updateCurrentPlan(updater: (plan: PlanEntry[]) => PlanEntry[]) {
     savePlan({ entries: updater(startCfg.plan) });
@@ -135,7 +173,7 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
 
   const plan = useMemo(() => {
     try {
-      return calculateFastestWayToGoal(startCfg, currentTick);
+      return simulatePlan(startCfg, currentTick);
     } catch (err) {
       console.error(err);
       return null;
@@ -202,7 +240,8 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
   const resolveEconomyAtTick = useCallback(
     (tick: number) => {
       const info = getMaxExtractorsAtTick(startCfg, tick);
-      const snap = getResourcesAtTick(startCfg, tick);
+      // Budget: was an diesem Tick ausgegeben werden kann, ohne spätere Einträge ins Minus zu ziehen.
+      const snap = getSpendableResourcesAtTick(startCfg, tick);
       let bonusAst = 0;
       let bonusExt = 0;
       if (dialogMode === "edit" && editingEntry) {
@@ -249,20 +288,20 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
     if (planEntryId) openEditEntryRef.current(planEntryId);
   }, []);
 
-  function openAddTech(name: string) {
+  function openAddTech(name: string, tick?: number) {
     const tech = byName().get(name);
     if (!tech) return;
-    const defaultTick = defaultAddTick(inspectTick, currentTick, getEarliestTechStartTick(startCfg, name));
+    const defaultTick = tick ?? defaultAddTick(inspectTick, currentTick, getEarliestTechStartTick(startCfg, name));
     setDialogMode("add");
     setEditingEntry(null);
     setDialogTarget({ kind: "tech", tech, defaultTick });
     setDialogOpen(true);
   }
 
-  function openAddUnit(name: string) {
+  function openAddUnit(name: string, tick?: number) {
     const unit = unitByName(name);
     if (!unit) return;
-    const defaultTick = defaultAddTick(inspectTick, currentTick, getEarliestBuildStartTick(startCfg, "unit", name));
+    const defaultTick = tick ?? defaultAddTick(inspectTick, currentTick, getEarliestBuildStartTick(startCfg, "unit", name));
     const maxCount = Math.max(1, getMaxBuildCountAtTick(startCfg, "unit", name, defaultTick));
     setDialogMode("add");
     setEditingEntry(null);
@@ -279,10 +318,10 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
     setDialogOpen(true);
   }
 
-  function openAddRecon(name: string) {
+  function openAddRecon(name: string, tick?: number) {
     const item = reconByName(name);
     if (!item) return;
-    const defaultTick = defaultAddTick(inspectTick, currentTick, getEarliestBuildStartTick(startCfg, "recon", name));
+    const defaultTick = tick ?? defaultAddTick(inspectTick, currentTick, getEarliestBuildStartTick(startCfg, "recon", name));
     const maxCount = Math.max(1, getMaxBuildCountAtTick(startCfg, "recon", name, defaultTick));
     setDialogMode("add");
     setEditingEntry(null);
@@ -299,19 +338,21 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
     setDialogOpen(true);
   }
 
+  function earliestEconomyTick() {
+    if (hasExtraktorTech) return getEarliestExtractorStartTick(startCfg);
+    if (hasObservatorium) return getEarliestAsteroidStartTick(startCfg);
+    return 0;
+  }
+
   function openAddEconomy(
     preset: {
       asteroids?: number;
       extractorsMet?: number;
       extractorsKris?: number;
-    } = {}
+    } = {},
+    tick?: number
   ) {
-    const earliest = hasExtraktorTech
-      ? getEarliestExtractorStartTick(startCfg)
-      : hasObservatorium
-        ? getEarliestAsteroidStartTick(startCfg)
-        : 0;
-    const defaultTick = defaultAddTick(inspectTick, currentTick, earliest);
+    const defaultTick = tick ?? defaultAddTick(inspectTick, currentTick, earliestEconomyTick());
     const info = getMaxExtractorsAtTick(startCfg, defaultTick);
     setDialogMode("add");
     setEditingEntry(null);
@@ -331,12 +372,12 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
     setDialogOpen(true);
   }
 
-  function openAddCustom() {
+  function openAddCustom(tick?: number) {
     setDialogMode("add");
     setEditingEntry(null);
     setDialogTarget({
       kind: "custom",
-      defaultTick: defaultAddTick(inspectTick, currentTick),
+      defaultTick: tick ?? defaultAddTick(inspectTick, currentTick),
       defaultLabel: "",
       defaultMet: 0,
       defaultKris: 0,
@@ -344,13 +385,16 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
     setDialogOpen(true);
   }
 
-  function openAddTrade() {
-    const doneTick = plan?.steps.find((s) => s.name === "Interstellarer Handel")?.endTick ?? 0;
+  function tradeReadyTick() {
+    return plan?.steps.find((s) => s.name === "Interstellarer Handel")?.endTick ?? 0;
+  }
+
+  function openAddTrade(tick?: number) {
     setDialogMode("add");
     setEditingEntry(null);
     setDialogTarget({
       kind: "trade",
-      defaultTick: defaultAddTick(inspectTick, currentTick, doneTick),
+      defaultTick: tick ?? defaultAddTick(inspectTick, currentTick, tradeReadyTick()),
       defaultGive: "met",
       defaultGiveAmount: 0,
       defaultReceiveAmount: 0,
@@ -386,23 +430,23 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
     });
   }
 
-  function openAddCatastrophe() {
+  function openAddCatastrophe(tick?: number) {
     setDialogMode("add");
     setEditingEntry(null);
     setDialogTarget({
       kind: "catastrophe",
-      defaultTick: defaultAddTick(inspectTick, currentTick),
+      defaultTick: tick ?? defaultAddTick(inspectTick, currentTick),
       defaultDuration: 1,
     });
     setDialogOpen(true);
   }
 
-  function openAddAttack() {
+  function openAddAttack(tick?: number) {
     setDialogMode("add");
     setEditingEntry(null);
     setDialogTarget({
       kind: "attack",
-      defaultTick: defaultAddTick(inspectTick, currentTick),
+      defaultTick: tick ?? defaultAddTick(inspectTick, currentTick),
       defaultDuration: 5,
       defaultRoidDuration: 5,
       defaultTargetMet: 0,
@@ -572,6 +616,74 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
     }
     setDialogOpen(true);
   }
+
+  /** Eintrag aus der Sidebar auf die Timeline gezogen: Techs direkt anlegen, alles andere über den Dialog. */
+  function dropNewItem(item: NewPlanItem, tick: number) {
+    switch (item.kind) {
+      case "tech":
+        updateCurrentPlan((plan) =>
+          plan.some((e) => e.kind === "tech" && e.name === item.name)
+            ? plan
+            : [...plan, { id: newPlanEntryId("tech"), kind: "tech", name: item.name, startTick: tick }]
+        );
+        return;
+      case "unit":
+        openAddUnit(item.name, tick);
+        return;
+      case "recon":
+        openAddRecon(item.name, tick);
+        return;
+      case "economy":
+        openAddEconomy({}, tick);
+        return;
+      case "attack":
+        openAddAttack(tick);
+        return;
+      case "catastrophe":
+        openAddCatastrophe(tick);
+        return;
+      case "trade":
+        openAddTrade(tick);
+        return;
+      case "custom":
+        openAddCustom(tick);
+    }
+  }
+
+  function moveEntry(planEntryId: string, startTick: number) {
+    updateCurrentPlan((plan) => plan.map((e) => (e.id === planEntryId ? { ...e, startTick } : e)));
+  }
+
+  /** Frühester sinnvoller Start (Voraussetzungen fertig, Rohstoffe reichen) für das gezogene Element. */
+  function earliestDropTick(data: PlanDragData): number | null {
+    if (data.source === "timeline") {
+      const entry = startCfg.plan.find((e) => e.id === data.planEntryId);
+      if (!entry) return null;
+      // Ohne den Eintrag selbst rechnen, sonst blockieren seine eigenen Kosten den Platz.
+      const cfg = withoutPlanEntry(startCfg, entry.id);
+      if (entry.kind === "tech") return getEarliestTechStartTick(cfg, entry.name);
+      if (entry.kind === "unit" || entry.kind === "recon") return getEarliestBuildStartTick(cfg, entry.kind, entry.name);
+      return null;
+    }
+    const { item } = data;
+    if (item.kind === "tech") return getEarliestTechStartTick(startCfg, item.name);
+    if (item.kind === "unit" || item.kind === "recon") return getEarliestBuildStartTick(startCfg, item.kind, item.name);
+    if (item.kind === "economy") return earliestEconomyTick();
+    if (item.kind === "trade") return tradeReadyTick();
+    return null;
+  }
+
+  // Stabile Callbacks für die memoisierte Timeline; sie lesen immer den aktuellen Plan.
+  const dragHandlersRef = useRef({ dropNewItem, moveEntry, earliestDropTick });
+  useEffect(() => {
+    dragHandlersRef.current = { dropNewItem, moveEntry, earliestDropTick };
+  });
+  const onDropItem = useCallback((item: NewPlanItem, tick: number) => dragHandlersRef.current.dropNewItem(item, tick), []);
+  const onMoveEntry = useCallback(
+    (planEntryId: string, startTick: number) => dragHandlersRef.current.moveEntry(planEntryId, startTick),
+    []
+  );
+  const getEarliestTick = useCallback((data: PlanDragData) => dragHandlersRef.current.earliestDropTick(data), []);
 
   function handleDialogSubmit(values: {
     startTick: number;
@@ -855,7 +967,7 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
       const source = plans.find((item) => item.slot === id);
       if (!isPlanSlotId(id) || id === viewId || !source) return;
       // Die Einstellungen (Startzeit usw.) gehören zum Slot und bleiben.
-      savePlan({ entries: source.entries, taxes: source.taxes, ignoreNonTechDeps: source.ignoreNonTechDeps });
+      savePlan({ entries: configFromPlan(source, today).plan, taxes: source.taxes, ignoreNonTechDeps: source.ignoreNonTechDeps });
     }
   }
 
@@ -863,8 +975,16 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
   function importPlan(json: string): string | null {
     const result = parseImportedPlan(json, current.settings);
     if (!result.ok) return result.error;
-    savePlan({
+    // Exporte älterer Versionen mit deren Steuern und Einstellungen migrieren.
+    const imported: StoredPlan = {
+      ...current,
       entries: result.entries,
+      planVersion: result.planVersion,
+      taxes: result.taxes,
+      settings: result.settings ?? current.settings,
+    };
+    savePlan({
+      entries: configFromPlan(imported, today).plan,
       taxes: result.taxes,
       ...(result.ignoreNonTechDeps !== undefined ? { ignoreNonTechDeps: result.ignoreNonTechDeps } : {}),
       ...(result.settings ? { settings: result.settings } : {}),
@@ -874,99 +994,112 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
 
   return (
     <TooltipProvider>
-      <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-background text-foreground">
-        <Header
-          now={now}
-          currentTick={currentTick}
-          startCfg={startCfg}
-          plan={plan}
-          nextAction={nextAction}
-          settings={current.settings}
-          onApplySettings={(settings) => savePlan({ settings })}
-          planSwitcher={
-            <PlanSwitcher
-              viewId={viewId}
-              livePlanId={liveSlot}
-              onViewChange={(id) => {
-                void setActiveSlot({ key: userKey, slot: id }).catch(logMutationError);
-              }}
-            />
-          }
-        />
-        <div className="grid min-h-0 flex-1 grid-cols-[20rem_minmax(0,1fr)]">
-          <Sidebar
-            techs={addableTechs}
-            neededTechs={neededTechs}
-            plannedTechs={plannedTechs}
-            ships={allShips}
-            defenses={allDefenses}
-            recon={allRecon}
-            hasObservatorium={hasObservatorium}
-            hasExtraktorTech={hasExtraktorTech}
-            attackBlocked={attackBlocked}
-            onAddTech={openAddTech}
-            onAddUnit={openAddUnit}
-            onAddRecon={openAddRecon}
-            onAddEconomy={openAddEconomy}
-            onAddCatastrophe={openAddCatastrophe}
-            onAddAttack={openAddAttack}
-            onAddCustom={openAddCustom}
-            onAddTrade={openAddTrade}
-            hasInterstellarerHandel={hasInterstellarerHandel}
-            ignoreMissingDeps={startCfg.ignore_non_tech_deps}
-          />
-          <Overview
-            actionTicks={actionTicks}
-            logTicks={plan?.ticks ?? []}
-            steps={plan?.steps ?? []}
-            maxTick={maxTick}
+      <DragDropProvider sensors={DRAG_SENSORS}>
+        <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-background text-foreground">
+          <Header
+            now={now}
             currentTick={currentTick}
-            historyWindow={current.settings.historyWindow}
-            inspectTick={inspectTick}
-            onInspectTick={setInspectTick}
-            tickClock={tickClock}
-            hasPlan={!!plan}
-            slotShortage={plan ? getExtractorSlotShortage(plan) : null}
-            exportJson={exportJson}
-            exportPlanSlot={activeSlot}
-            onImportPlan={importPlan}
-            resetSources={[
-              ...planTemplates.map((template) => ({
-                id: `template:${template.id}`,
-                label: template.label,
-              })),
-              ...PLAN_SLOT_IDS.filter((id) => id !== activeSlot).map((id) => ({
-                id: `plan:${id}`,
-                label: planSlotLabel(id),
-              })),
-            ]}
-            onResetPlan={resetPlan}
-            taxes={startCfg.taxes}
-            onAddSnapshot={openAddSnapshot}
-            ignoreNonTechDeps={startCfg.ignore_non_tech_deps}
-            onIgnoreNonTechDepsChange={(ignoreNonTechDeps) => savePlan({ ignoreNonTechDeps })}
-            onApplyTaxes={(taxes) => savePlan({ taxes })}
-            isLivePlan={liveSlot === activeSlot}
-            onSetLivePlan={() => {
-              void setLiveSlot({ key: userKey, slot: activeSlot }).catch(logMutationError);
-            }}
-            onEditJob={onEditJob}
+            startCfg={startCfg}
+            plan={plan}
+            nextAction={nextAction}
+            settings={current.settings}
+            onApplySettings={(settings) => savePlan({ settings })}
+            planSwitcher={
+              <PlanSwitcher
+                viewId={viewId}
+                livePlanId={liveSlot}
+                onViewChange={(id) => {
+                  void setActiveSlot({ key: userKey, slot: id }).catch(logMutationError);
+                }}
+              />
+            }
           />
-        </div>
+          <div className="grid min-h-0 flex-1 grid-cols-[20rem_minmax(0,1fr)]">
+            <Sidebar
+              techs={addableTechs}
+              neededTechs={neededTechs}
+              plannedTechs={plannedTechs}
+              ships={allShips}
+              defenses={allDefenses}
+              recon={allRecon}
+              hasObservatorium={hasObservatorium}
+              hasExtraktorTech={hasExtraktorTech}
+              attackBlocked={attackBlocked}
+              onAddTech={openAddTech}
+              onAddUnit={openAddUnit}
+              onAddRecon={openAddRecon}
+              onAddEconomy={openAddEconomy}
+              onAddCatastrophe={openAddCatastrophe}
+              onAddAttack={openAddAttack}
+              onAddCustom={openAddCustom}
+              onAddTrade={openAddTrade}
+              hasInterstellarerHandel={hasInterstellarerHandel}
+              ignoreMissingDeps={startCfg.ignore_non_tech_deps}
+            />
+            <Overview
+              actionTicks={actionTicks}
+              logTicks={plan?.ticks ?? []}
+              steps={plan?.steps ?? []}
+              maxTick={maxTick}
+              currentTick={currentTick}
+              historyWindow={current.settings.historyWindow}
+              inspectTick={inspectTick}
+              onInspectTick={setInspectTick}
+              tickClock={tickClock}
+              hasPlan={!!plan}
+              slotShortage={plan ? getExtractorSlotShortage(plan) : null}
+              exportJson={exportJson}
+              exportPlanSlot={activeSlot}
+              onImportPlan={importPlan}
+              resetSources={[
+                ...planTemplates.map((template) => ({
+                  id: `template:${template.id}`,
+                  label: template.label,
+                })),
+                ...PLAN_SLOT_IDS.filter((id) => id !== activeSlot).map((id) => ({
+                  id: `plan:${id}`,
+                  label: planSlotLabel(id),
+                })),
+              ]}
+              onResetPlan={resetPlan}
+              taxes={startCfg.taxes}
+              onAddSnapshot={openAddSnapshot}
+              ignoreNonTechDeps={startCfg.ignore_non_tech_deps}
+              onIgnoreNonTechDepsChange={(ignoreNonTechDeps) => savePlan({ ignoreNonTechDeps })}
+              onApplyTaxes={(taxes) => savePlan({ taxes })}
+              isLivePlan={liveSlot === activeSlot}
+              onSetLivePlan={() => {
+                void setLiveSlot({ key: userKey, slot: activeSlot }).catch(logMutationError);
+              }}
+              onEditJob={onEditJob}
+              onMoveEntry={onMoveEntry}
+              onDropItem={onDropItem}
+              getEarliestTick={getEarliestTick}
+            />
+          </div>
 
-        <PlanEntryDialog
-          open={dialogOpen}
-          onOpenChange={setDialogOpen}
-          mode={dialogMode}
-          target={dialogTarget}
-          startCfg={startCfg}
-          entry={editingEntry}
-          onSubmit={handleDialogSubmit}
-          onRemove={dialogMode === "edit" ? handleDialogRemove : undefined}
-          resolveMaxCount={resolveMaxCount}
-          resolveEconomyAtTick={resolveEconomyAtTick}
-        />
-      </main>
+          <PlanEntryDialog
+            open={dialogOpen}
+            onOpenChange={setDialogOpen}
+            mode={dialogMode}
+            target={dialogTarget}
+            startCfg={startCfg}
+            entry={editingEntry}
+            onSubmit={handleDialogSubmit}
+            onRemove={dialogMode === "edit" ? handleDialogRemove : undefined}
+            resolveMaxCount={resolveMaxCount}
+            resolveEconomyAtTick={resolveEconomyAtTick}
+          />
+        </main>
+        {/* Nur Einträge aus der Sidebar folgen dem Mauszeiger; Balken zeigt die Timeline selbst als Vorschau. */}
+        <DragOverlay<PlanDragData, Draggable<PlanDragData>> dropAnimation={null} disabled={(source) => !isSidebarDrag(source)}>
+          {(source) => (
+            <div className="pointer-events-none w-fit rounded-md bg-popover px-2 py-1 text-xs font-medium text-popover-foreground shadow-md ring-1 ring-foreground/10">
+              {source.data.label}
+            </div>
+          )}
+        </DragOverlay>
+      </DragDropProvider>
     </TooltipProvider>
   );
 }

@@ -68,7 +68,7 @@ export const fastCleptor: PlanTemplate = {
       id: "tech_mrupmso1_llr8pa",
       kind: "tech",
       name: "Raumfahrt",
-      startTick: 24,
+      startTick: 25,
     },
     {
       id: "tech_mrupnkgx_nhtpwz",

@@ -40,6 +40,7 @@ export function AvailableTechs({ techs, needed, planned, onAdd }: AvailableTechs
                 <SidebarRow
                   key={tech.name}
                   onClick={() => onAdd(tech.name)}
+                  drag={{ item: { kind: "tech", name: tech.name }, label: tech.name }}
                   titleClassName={jobTypeClass(tech.type)}
                   title={
                     <>

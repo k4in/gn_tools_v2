@@ -15,6 +15,7 @@ export function useUpdatePlan() {
           ? {
               ...plan,
               ...(patch.entries ? { entries: patch.entries } : {}),
+              ...(patch.planVersion !== undefined ? { planVersion: patch.planVersion } : {}),
               ...(patch.taxes ? { taxes: patch.taxes } : {}),
               ...(patch.ignoreNonTechDeps !== undefined ? { ignoreNonTechDeps: patch.ignoreNonTechDeps } : {}),
               ...(patch.settings ? { settings: patch.settings } : {}),
