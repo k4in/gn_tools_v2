@@ -281,3 +281,11 @@ Applies only if `convex` exists in the project's dependencies. All Convex-specif
 
 - Any change that violates these rules is **non-compliant** and must be corrected before the change is considered done.
 - These rules override personal preferences and editor defaults.
+
+---
+
+## Open bugs (`todo.md`)
+
+- The bugs listed in `todo.md` (taxes 1 tick later, times / daylight saving time change) must **not** be fixed before **2026-11-20**. Do not start on them earlier, even if asked in passing — remind the user of this date instead.
+- From 2026-11-20 on: remind the user to work on these bugs.
+- When fixing the taxes bug, the "1 tick later" function must be reviewed and verified as well.
