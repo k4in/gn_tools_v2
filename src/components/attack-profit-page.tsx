@@ -477,7 +477,7 @@ function AttackProfit({ plan, planId }: AttackProfitProps) {
         </div>
 
         <Card size="sm">
-          <CardHeader>
+          <CardHeader className="max-md:has-data-[slot=card-action]:grid-cols-1">
             <CardTitle>Angriffe</CardTitle>
             <CardDescription>
               {GAIN_DAYS.map((day, i) => `Tick ${formatRes(gainTicks[i])} = ${day} Tage`).join(", ")} nach Rundenanfang.

@@ -22,9 +22,11 @@ export type ResetPlanSource = {
 export type ResetPlanDialogProps = {
   sources: ResetPlanSource[];
   onReset: (sourceId: string) => void;
+  /** Auslöser rot statt dezent (z. B. mobil, wo er allein steht). */
+  destructive?: boolean;
 };
 
-export function ResetPlanDialog({ sources, onReset }: ResetPlanDialogProps) {
+export function ResetPlanDialog({ sources, onReset, destructive = false }: ResetPlanDialogProps) {
   const [open, setOpen] = useState(false);
   const [source, setSource] = useState<ResetPlanSource | null>(sources[0] ?? null);
 
@@ -36,7 +38,15 @@ export function ResetPlanDialog({ sources, onReset }: ResetPlanDialogProps) {
         if (next) setSource(sources[0] ?? null);
       }}
     >
-      <DialogTrigger render={<Button type="button" variant="ghost" className="hover:bg-destructive/15 hover:text-destructive" />}>
+      <DialogTrigger
+        render={
+          destructive ? (
+            <Button type="button" variant="destructive" />
+          ) : (
+            <Button type="button" variant="ghost" className="hover:bg-destructive/15 hover:text-destructive" />
+          )
+        }
+      >
         <ListRestart data-icon="inline-start" />
         Zurücksetzen
       </DialogTrigger>

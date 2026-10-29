@@ -14,15 +14,7 @@ import { CURRENT_PLAN_VERSION } from "@convex/lib/validators.ts";
 import { type NewPlanItem, type PlanDragData } from "@/types/plan-drag.ts";
 
 // Lib/Utils
-import {
-  isPlanSlotId,
-  PLAN_SLOT_IDS,
-  planSlotLabel,
-  planTemplates,
-  type PlanEntry,
-  type PlanSlotId,
-  type RoidMulti,
-} from "@/lib/gn-data/plan.ts";
+import { type PlanEntry, type PlanSlotId, type RoidMulti } from "@/lib/gn-data/plan.ts";
 import {
   ASTEROID_COST,
   attackRoidStartTick,
@@ -30,7 +22,6 @@ import {
   byName,
   clampAttackRoidDuration,
   clockLabel,
-  computeCurrentTick,
   extractorBatchCost,
   getAddableTechs,
   getDefenses,
@@ -50,23 +41,23 @@ import {
   newPlanEntryId,
   reconByName,
   removePlanEntryCascade,
-  simulatePlan,
   unitByName,
   type StartConfig,
 } from "@/lib/calculate-fastest-way-to-goal.ts";
 import {
   configFromPlan,
-  localDateKey,
   needsPlanMigration,
   parseImportedPlan,
   planExportJson,
   toStoredEntries,
-  type PlanSettings,
   type StoredPlan,
 } from "@/lib/utils/plan-data.ts";
+import { planResetPatch, planResetSources } from "@/lib/utils/plan-reset.ts";
 
 // Hooks
-import { useNow } from "@/hooks/useNow.tsx";
+import { useMediaQuery } from "@/hooks/useMediaQuery.tsx";
+import { usePlanSimulation } from "@/hooks/usePlanSimulation.tsx";
+import { useSavePlan } from "@/hooks/useSavePlan.tsx";
 import { useUpdatePlan } from "@/hooks/useUpdatePlan.tsx";
 import { useUserKey } from "@/hooks/useUserKey.tsx";
 import { useUserSlots } from "@/hooks/useUserSlots.tsx";
@@ -76,6 +67,7 @@ import { TooltipProvider } from "@/components/shadcn/tooltip.tsx";
 
 // Components
 import { Header } from "@/components/header.tsx";
+import { MobilePlanner } from "@/components/mobile-planner.tsx";
 import { Overview } from "@/components/overview/overview.tsx";
 import { PageLoading } from "@/components/page-loading.tsx";
 import { PlanEntryDialog, type PlanEntryDialogTarget } from "@/components/plan-entry-dialog.tsx";
@@ -110,13 +102,16 @@ function isSidebarDrag(source: Draggable<PlanDragData> | null) {
   return source?.data.source === "sidebar";
 }
 
-/** Lädt die Plan-Slots des eingeloggten Nutzers aus Convex. */
+/** Lädt die Plan-Slots des eingeloggten Nutzers aus Convex; mobil gibt es eine eigene, reduzierte Ansicht. */
 export function StartplanPage() {
   const { userKey } = useUserKey();
   const plans = useQuery(api.plans.list, userKey ? { key: userKey } : "skip");
   const me = useQuery(api.users.me, userKey ? { key: userKey } : "skip");
+  // Entspricht Tailwinds `max-md`.
+  const isMobile = useMediaQuery("(width < 48rem)");
 
   if (!userKey || !plans || !me) return <PageLoading />;
+  if (isMobile) return <MobilePlanner userKey={userKey} plans={plans} slot={me.liveSlot ?? me.activeSlot} />;
   return <Planner userKey={userKey} plans={plans} viewId={me.activeSlot} liveSlot={me.liveSlot} />;
 }
 
@@ -135,20 +130,8 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
   const activeSlot = viewId;
   const current = plans.find((item) => item.slot === viewId) ?? plans[0];
 
-  const now = useNow();
-  const today = localDateKey(now);
-  const startCfg = useMemo(() => configFromPlan(current, today), [current, today]);
-
-  function savePlan(patch: { entries?: PlanEntry[]; taxes?: StoredPlan["taxes"]; ignoreNonTechDeps?: boolean; settings?: PlanSettings }) {
-    const { entries, ...rest } = patch;
-    void updatePlan({
-      key: userKey,
-      slot: viewId,
-      ...rest,
-      // Einträge kommen immer aus einer (ggf. migrierten) Config und haben damit die aktuelle Semantik.
-      ...(entries ? { entries: toStoredEntries(entries), planVersion: CURRENT_PLAN_VERSION } : {}),
-    }).catch(logMutationError);
-  }
+  const { now, today, startCfg, currentTick, plan, actionTicks, nextAction } = usePlanSimulation(current);
+  const savePlan = useSavePlan(userKey, viewId);
 
   // Pläne alter Versionen einmalig mit festen Start-Ticks speichern (alle Slots, nicht nur der angezeigte).
   const migratingSlotsRef = useRef(new Set<PlanSlotId>());
@@ -168,17 +151,6 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
   function updateCurrentPlan(updater: (plan: PlanEntry[]) => PlanEntry[]) {
     savePlan({ entries: updater(startCfg.plan) });
   }
-
-  const currentTick = computeCurrentTick(startCfg, now);
-
-  const plan = useMemo(() => {
-    try {
-      return simulatePlan(startCfg, currentTick);
-    } catch (err) {
-      console.error(err);
-      return null;
-    }
-  }, [startCfg, currentTick]);
 
   const addableTechs = useMemo(() => getAddableTechs(startCfg.plan), [startCfg.plan]);
   const neededTechs = useMemo(() => missingRequiredTechs(startCfg.plan), [startCfg.plan]);
@@ -200,14 +172,6 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
     ...(plan?.steps ?? []).filter((s) => s.type === "attack").map((s) => s.endTick),
     1
   );
-  const actionTicks = useMemo(() => (plan ? plan.ticks.filter((t) => t.started.length > 0) : []), [plan]);
-
-  const nextAction = useMemo(() => {
-    const ticks = actionTicks.filter((t) =>
-      t.started.some((job) => job.type !== "custom" && job.type !== "trade" && job.type !== "snapshot")
-    );
-    return ticks.find((t) => t.tick >= currentTick) ?? null;
-  }, [actionTicks, currentTick]);
 
   const [inspectTick, setInspectTick] = useState<number | null>(null);
 
@@ -957,18 +921,8 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
   }
 
   function resetPlan(sourceId: string) {
-    if (sourceId.startsWith("template:")) {
-      const templateId = sourceId.slice("template:".length);
-      const template = planTemplates.find((item) => item.id === templateId);
-      if (!template) return;
-      savePlan({ entries: template.plan, taxes: [], ignoreNonTechDeps: false });
-    } else if (sourceId.startsWith("plan:")) {
-      const id = Number(sourceId.slice("plan:".length));
-      const source = plans.find((item) => item.slot === id);
-      if (!isPlanSlotId(id) || id === viewId || !source) return;
-      // Die Einstellungen (Startzeit usw.) gehören zum Slot und bleiben.
-      savePlan({ entries: configFromPlan(source, today).plan, taxes: source.taxes, ignoreNonTechDeps: source.ignoreNonTechDeps });
-    }
+    const patch = planResetPatch(sourceId, plans, viewId, today);
+    if (patch) savePlan(patch);
   }
 
   /** Ersetzt den Plan durch ein importiertes JSON. Gibt eine Fehlermeldung zurück, wenn es ungültig ist. */
@@ -1051,16 +1005,7 @@ function Planner({ userKey, plans, viewId, liveSlot }: PlannerProps) {
               exportJson={exportJson}
               exportPlanSlot={activeSlot}
               onImportPlan={importPlan}
-              resetSources={[
-                ...planTemplates.map((template) => ({
-                  id: `template:${template.id}`,
-                  label: template.label,
-                })),
-                ...PLAN_SLOT_IDS.filter((id) => id !== activeSlot).map((id) => ({
-                  id: `plan:${id}`,
-                  label: planSlotLabel(id),
-                })),
-              ]}
+              resetSources={planResetSources(activeSlot)}
               onResetPlan={resetPlan}
               taxes={startCfg.taxes}
               onAddSnapshot={openAddSnapshot}

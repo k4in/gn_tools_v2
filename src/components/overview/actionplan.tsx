@@ -308,18 +308,60 @@ export type ActionPlanProps = {
   inspectTick?: number | null;
   hasPlan: boolean;
   isActive?: boolean;
+  /** Schmale Ansicht: Tick und Uhrzeit in einer Spalte, Quests/Custom unter dem Auftrag, Zeilen brechen um. */
+  narrow?: boolean;
 };
 
 /** Kompakter Auftragsplan: Tick · Uhrzeit · Auftrag. Memoisiert, weil die Seite sekündlich neu rendert. */
-export const ActionPlan = memo(function ActionPlan({ ticks, currentTick, inspectTick = null, hasPlan, isActive = false }: ActionPlanProps) {
+export const ActionPlan = memo(function ActionPlan({
+  ticks,
+  currentTick,
+  inspectTick = null,
+  hasPlan,
+  isActive = false,
+  narrow = false,
+}: ActionPlanProps) {
   const currentRowRef = useRef<HTMLTableRowElement>(null);
   const nextTick = hasPlan ? (ticks.find((t) => t.tick >= currentTick && withoutCustom(t.started).length > 0)?.tick ?? null) : null;
   const inspectRowTick = hasPlan && inspectTick != null ? tickAtOrAfter(ticks, inspectTick) : null;
-  const scrollTick = inspectRowTick ?? nextTick;
-  useScrollIntoViewWhenActive(isActive, currentRowRef, "center", "nearest", scrollTick);
+  // Schmal: einmalig beim Laden zum aktuellen Tick, danach nicht mehr ungefragt springen.
+  const scrollTick = narrow ? (tickAtOrBefore(ticks, currentTick) ?? ticks[0]?.tick ?? null) : (inspectRowTick ?? nextTick);
+  useScrollIntoViewWhenActive(isActive, currentRowRef, "center", "nearest", narrow ? undefined : scrollTick);
 
   if (!hasPlan) {
     return <p className="p-4 text-sm text-muted-foreground">Kein Plan berechenbar.</p>;
+  }
+
+  if (narrow) {
+    return (
+      <Table containerClassName="h-full overflow-auto">
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-28">Tick</TableHead>
+            <TableHead>Auftrag</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {ticks.map((t) => {
+            const isNext = nextTick !== null && t.tick === nextTick;
+            const orders = withoutCustom(t.started);
+            const extras = <ExtraEvents customs={onlyCustom(t.started)} tick={t} />;
+            return (
+              <TableRow key={t.tick} ref={scrollTick === t.tick ? currentRowRef : undefined} className={cn(isNext && "bg-green-500/15")}>
+                <TableCell className="align-top tabular-nums">
+                  <div className="font-medium">{t.tick}</div>
+                  <div className="text-[11px] text-muted-foreground">{t.clockLabel}</div>
+                </TableCell>
+                <TableCell className="align-top whitespace-normal">
+                  <div>{orders.length ? <JobList items={orders} /> : "—"}</div>
+                  <div className="text-[11px] empty:hidden">{extras}</div>
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    );
   }
 
   return (
