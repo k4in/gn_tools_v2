@@ -768,7 +768,8 @@ export function PlanEntryDialog({
                 economyCosts &&
                 extractorMetCount + extractorKrisCount > economyCosts.maxExtractors && (
                   <p className="text-amber-500">
-                    Mehr Extraktoren als Slots/Metall bei diesem Tick — ohne Asteroidenplatz liefern sie keine Rohstoffe.
+                    Mehr Extraktoren als Slots/Metall bei diesem Tick — was das Metall nicht hergibt, wird in den Folgeticks gebaut. Ohne
+                    Asteroidenplatz liefern sie keine Rohstoffe.
                   </p>
                 )}
               {asteroidCount > 0 && !target.canAsteroids && <p className="text-amber-500">Observatorium fehlt im Plan.</p>}

@@ -1381,6 +1381,79 @@ function runSimulation(
     const catastropheLoss: RoidLootEvent[] = [];
     let spent: Res = { met: 0, kris: 0 };
 
+    /** Kauft die Asteroiden und baut die Exen eines Wirtschafts-Eintrags, soweit möglich. */
+    function startEconomy(entry: PlanEntry, pending: PendingEconomy) {
+      let didWork = false;
+
+      // Asteroids first so slots open for extractors in the same entry/tick.
+      if (pending.remainingAsteroids > 0) {
+        while (pending.remainingAsteroids > 0 && mayStart({ met: 0, kris: ASTEROID_COST_KRIS })) {
+          const cost = { met: 0, kris: ASTEROID_COST_KRIS };
+          res = pay(res, cost);
+          spent = addRes(spent, cost);
+          asteroids += 1;
+          extractorSlots += EXTRACTOR_SLOT_PER_ASTEROID;
+          pending.remainingAsteroids -= 1;
+          didWork = true;
+          const name = `Asteroid scannen #${asteroids}`;
+          const job: Job = {
+            name,
+            type: "economy",
+            startTick: tick,
+            endTick: tick,
+            cost,
+            planEntryId: entry.id,
+            blocked: !completed.has("Observatorium"),
+            underfunded: isUnderfunded(res, cost),
+          };
+          steps.push(job);
+          startedJobs.push({ name, type: "economy", planEntryId: entry.id, underfunded: job.underfunded });
+          finishedJobs.push({ name, type: "economy", planEntryId: entry.id });
+          markEntryStart(entry.id, tick);
+        }
+      }
+
+      function buildExtractors(economy: PendingEconomy, resource: "met" | "kris") {
+        const remainingKey = resource === "met" ? "remainingExtractorsMet" : "remainingExtractorsKris";
+        while (economy[remainingKey] > 0) {
+          const nextIndex = totalExtractors() + 1;
+          const cost = { met: extractorUnitCost(nextIndex), kris: 0 };
+          // Exen gehen nie ins Minus: Was am Tick nicht bezahlbar ist, wird in den Folgeticks gebaut.
+          if (!canAfford(res, cost)) break;
+          res = pay(res, cost);
+          spent = addRes(spent, cost);
+          if (resource === "met") extractorsMet += 1;
+          else extractorsKris += 1;
+          extractorQueue.push(resource);
+          extractorQueueVersion += 1;
+          economy[remainingKey] -= 1;
+          didWork = true;
+          const label = resource === "met" ? `Extraktor (Metall) #${extractorsMet}` : `Extraktor (Kristall) #${extractorsKris}`;
+          const job: Job = {
+            name: label,
+            type: "economy",
+            startTick: tick,
+            endTick: tick,
+            cost,
+            planEntryId: entry.id,
+            blocked: !completed.has("Extraktor"),
+          };
+          steps.push(job);
+          startedJobs.push({ name: label, type: "economy", planEntryId: entry.id });
+          finishedJobs.push({ name: label, type: "economy", planEntryId: entry.id });
+          markEntryStart(entry.id, tick);
+        }
+      }
+      buildExtractors(pending, "met");
+      buildExtractors(pending, "kris");
+
+      if (didWork && pending.remainingAsteroids <= 0 && pending.remainingExtractorsMet <= 0 && pending.remainingExtractorsKris <= 0) {
+        markEntryFinish(entry.id, tick);
+      }
+    }
+
+    const carriedEconomy: Array<{ entry: PlanEntry; pending: PendingEconomy }> = [];
+
     // Earlier desired startTick first; same tick keeps plan order.
     // Kein Eintrag startet vor seinem startTick (alle Wunsch-Ticks sind ≥ startTick),
     // daher reicht es, die bereits fälligen Einträge vorne in `openOrder` zu prüfen.
@@ -1496,74 +1569,12 @@ function runSimulation(
           continue;
         }
         if (tick < pending.desiredTick) continue;
-
-        let didWork = false;
-
-        // Asteroids first so slots open for extractors in the same entry/tick.
-        if (pending.remainingAsteroids > 0) {
-          while (pending.remainingAsteroids > 0 && mayStart({ met: 0, kris: ASTEROID_COST_KRIS })) {
-            const cost = { met: 0, kris: ASTEROID_COST_KRIS };
-            res = pay(res, cost);
-            spent = addRes(spent, cost);
-            asteroids += 1;
-            extractorSlots += EXTRACTOR_SLOT_PER_ASTEROID;
-            pending.remainingAsteroids -= 1;
-            didWork = true;
-            const name = `Asteroid scannen #${asteroids}`;
-            const job: Job = {
-              name,
-              type: "economy",
-              startTick: tick,
-              endTick: tick,
-              cost,
-              planEntryId: entry.id,
-              blocked: !completed.has("Observatorium"),
-              underfunded: isUnderfunded(res, cost),
-            };
-            steps.push(job);
-            startedJobs.push({ name, type: "economy", planEntryId: entry.id, underfunded: job.underfunded });
-            finishedJobs.push({ name, type: "economy", planEntryId: entry.id });
-            markEntryStart(entry.id, tick);
-          }
+        // Exen nehmen nur, was die anderen Einträge des Ticks übrig lassen, und ziehen sie so nicht ins Minus.
+        if (!legacy) {
+          carriedEconomy.push({ entry, pending });
+          continue;
         }
-
-        function buildExtractors(economy: PendingEconomy, resource: "met" | "kris") {
-          const remainingKey = resource === "met" ? "remainingExtractorsMet" : "remainingExtractorsKris";
-          while (economy[remainingKey] > 0) {
-            const nextIndex = totalExtractors() + 1;
-            const cost = { met: extractorUnitCost(nextIndex), kris: 0 };
-            if (!mayStart(cost)) break;
-            res = pay(res, cost);
-            spent = addRes(spent, cost);
-            if (resource === "met") extractorsMet += 1;
-            else extractorsKris += 1;
-            extractorQueue.push(resource);
-            extractorQueueVersion += 1;
-            economy[remainingKey] -= 1;
-            didWork = true;
-            const label = resource === "met" ? `Extraktor (Metall) #${extractorsMet}` : `Extraktor (Kristall) #${extractorsKris}`;
-            const job: Job = {
-              name: label,
-              type: "economy",
-              startTick: tick,
-              endTick: tick,
-              cost,
-              planEntryId: entry.id,
-              blocked: !completed.has("Extraktor"),
-              underfunded: isUnderfunded(res, cost),
-            };
-            steps.push(job);
-            startedJobs.push({ name: label, type: "economy", planEntryId: entry.id, underfunded: job.underfunded });
-            finishedJobs.push({ name: label, type: "economy", planEntryId: entry.id });
-            markEntryStart(entry.id, tick);
-          }
-        }
-        buildExtractors(pending, "met");
-        buildExtractors(pending, "kris");
-
-        if (didWork && pending.remainingAsteroids <= 0 && pending.remainingExtractorsMet <= 0 && pending.remainingExtractorsKris <= 0) {
-          markEntryFinish(entry.id, tick);
-        }
+        startEconomy(entry, pending);
         continue;
       }
 
@@ -1748,6 +1759,8 @@ function runSimulation(
         }
       }
     }
+
+    for (const { entry, pending } of carriedEconomy) startEconomy(entry, pending);
 
     // Erledigte Einträge aus dem fälligen Teil entfernen; Reihenfolge bleibt erhalten.
     if (due > 0) {
