@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { ExportPlanDialog } from "@/components/export-plan-dialog.tsx";
 import { ImportPlanDialog } from "@/components/import-plan-dialog.tsx";
 import { ResetPlanDialog, type ResetPlanSource } from "@/components/reset-plan-dialog.tsx";
+import { QuestsDialog } from "@/components/quests-dialog.tsx";
 import { TaxesDialog } from "@/components/taxes-dialog.tsx";
 import { ActionPlan } from "@/components/overview/actionplan.tsx";
 import { Protocol } from "@/components/overview/protocol.tsx";
@@ -97,6 +98,7 @@ export function Overview({
               <TabsTrigger value="compact">Kompakt</TabsTrigger>
               <TabsTrigger value="detailed">Detailliert</TabsTrigger>
             </TabsList>
+            <QuestsDialog ticks={logTicks} currentTick={currentTick} />
             {onApplyTaxes && <TaxesDialog taxes={taxes} currentTick={currentTick} onApply={onApplyTaxes} />}
             {onAddSnapshot && (
               <Button type="button" variant="outline" onClick={onAddSnapshot}>
