@@ -297,7 +297,10 @@ function AttackProfit({ plan, planId }: AttackProfitProps) {
   const gainTicks = useMemo(() => GAIN_DAYS.map((day) => dayToTick(day, perDay)), [perDay]);
   const manualTaxes = draft.manualTaxes;
   const taxes = useMemo<TaxSegment[]>(
-    () => (manualTaxes ? [{ fromTick: 0, met: parsePercent(manualTaxes.met), kris: parsePercent(manualTaxes.kris) }] : cfg.taxes),
+    () =>
+      manualTaxes
+        ? [{ fromTick: Number.NEGATIVE_INFINITY, met: parsePercent(manualTaxes.met), kris: parsePercent(manualTaxes.kris) }]
+        : cfg.taxes,
     [manualTaxes, cfg.taxes]
   );
 

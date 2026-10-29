@@ -40,6 +40,7 @@ import {
   roidsOverlap,
   type StartConfig,
 } from "@/lib/calculate-fastest-way-to-goal.ts";
+import { cn } from "@/lib/utils/cn.ts";
 
 // Shadcn components
 import { Button } from "@/components/shadcn/button.tsx";
@@ -368,6 +369,8 @@ export function PlanEntryDialog({
     if (target.kind === "unit" || target.kind === "recon") return target.maxCount;
     return 999;
   }, [target, startTick, resolveMaxCount]);
+  // Einträge starten fest an ihrem Tick: mehr als bezahlbar zieht das Konto ins Minus. 1 Stück geht immer.
+  const countLimit = Math.max(1, liveMax);
 
   const liveEconomy = useMemo(() => {
     if (!target || (target.kind !== "economy" && target.kind !== "catastrophe")) return null;
@@ -596,8 +599,7 @@ export function PlanEntryDialog({
     if (startTick < 0) return false;
     if (target.kind === "tech") return true;
     if (target.kind === "unit" || target.kind === "recon") {
-      // Das Maximum ist nur ein Hinweis: reichen die Rohstoffe nicht, startet der Auftrag später.
-      return count >= 1;
+      return count >= 1 && count <= countLimit;
     }
     if (target.kind === "economy") {
       const a = Math.max(0, asteroidCount);
@@ -839,6 +841,7 @@ export function PlanEntryDialog({
                     id="plan-count"
                     type="number"
                     min={1}
+                    max={countLimit}
                     value={count}
                     onChange={(e) => {
                       const n = Number(e.target.value);
@@ -1268,9 +1271,9 @@ export function PlanEntryDialog({
           </div>
 
           {(target.kind === "unit" || target.kind === "recon") && (
-            <p className="text-[11px] text-muted-foreground tabular-nums">
+            <p className={cn("text-[11px] tabular-nums", count > countLimit ? "text-destructive" : "text-muted-foreground")}>
               Max. bei Tick {startTick}: {liveMax}
-              {count > liveMax ? " · Mehr als die Rohstoffe erlauben, der Auftrag startet später." : null}
+              {count > countLimit ? " · Mehr als die Rohstoffe an diesem Tick erlauben." : null}
             </p>
           )}
 

@@ -93,7 +93,8 @@ export function TaxesDialog({ taxes, currentTick, onApply }: TaxesDialogProps) {
   }, [open, taxes]);
 
   const parsed = useMemo(() => parseRows(rows), [rows]);
-  const currentRates = taxRatesAt(taxes, currentTick);
+  // Gesetzte Steuern greifen ab dem nächsten Tick; angezeigt wird, was fürs nächste Einkommen gilt.
+  const currentRates = taxRatesAt(taxes, currentTick + 1);
   const hasTaxes = taxes.length > 0;
   const dirty = parsed.ok && JSON.stringify(parsed.taxes) !== JSON.stringify(normalizeTaxes(taxes));
   const canApply = parsed.ok && dirty;

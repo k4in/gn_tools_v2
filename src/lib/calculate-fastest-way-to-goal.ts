@@ -46,7 +46,10 @@ const INCOME_BY_BUILDING: Record<string, { met: number; kris: number }> = {
 // Plan model
 // ---------------------------------------------------------------------------
 
-/** Steuer-Abschnitt: gilt ab `fromTick` bis zum nächsten Abschnitt bzw. Planende. */
+/**
+ * Steuer-Abschnitt: an `fromTick` gesetzt, greift ab dem Einkommen des Folgeticks (Steuern um 9:00 →
+ * gelten ab 9:15) bis zum nächsten Abschnitt bzw. Planende.
+ */
 export type TaxSegment = {
   fromTick: number;
   /** Steuer auf Metall-Einkommen in Prozent (0–100). */
@@ -92,11 +95,12 @@ export function normalizeTaxes(raw: unknown): TaxSegment[] {
   return [...byTick.values()].sort((a, b) => a.fromTick - b.fromTick);
 }
 
+/** Steuersätze für das Einkommen an `tick`. Ein Abschnitt greift erst einen Tick nach `fromTick`. */
 export function taxRatesAt(taxes: TaxSegment[] | undefined, tick: number): { met: number; kris: number } {
   let current = { met: 0, kris: 0 };
   if (!taxes) return current;
   for (const seg of taxes) {
-    if (seg.fromTick > tick) break;
+    if (seg.fromTick >= tick) break;
     current = { met: seg.met, kris: seg.kris };
   }
   return current;
@@ -314,13 +318,10 @@ export function incomeFrom(completed: Set<string>): Res {
   return { met, kris };
 }
 
-function parseStartMinutes(time: string) {
-  const [h, m] = time.split(":").map(Number);
-  return h * 60 + m;
-}
+type ClockConfig = Pick<StartConfig, "start_time" | "start_date" | "tick_minutes">;
 
 /** Lokale Start-DateTime aus plan-defaults (ohne TZ-Drift durch ISO-Parse). */
-function startDateTime(startCfg: StartConfig): Date {
+function startDateTime(startCfg: ClockConfig): Date {
   const [y, mo, d] = startCfg.start_date.split("-").map(Number);
   const [h, m] = startCfg.start_time.split(":").map(Number);
   return new Date(y, mo - 1, d, h, m, 0, 0);
@@ -344,7 +345,11 @@ export function formatWallClock(date: Date) {
   return `${d}.${mo}.${y} ${hh}:${mm}`;
 }
 
-function tickDateTime(startCfg: StartConfig, tick: number): Date {
+/**
+ * Zeitpunkt eines Ticks. Ticks laufen in Echtzeit weiter, auch über die Zeitumstellung: Im Oktober
+ * gibt es 2–3 Uhr doppelt, im April fällt die Stunde weg.
+ */
+function tickDateTime(startCfg: ClockConfig, tick: number): Date {
   const start = startDateTime(startCfg);
   return new Date(start.getTime() + tick * tickMinutesOf(startCfg) * 60 * 1000);
 }
@@ -368,19 +373,9 @@ export function formatTimeUntilTick(startCfg: StartConfig, tick: number, now: Da
   return `in ${hours} ${hours === 1 ? "Stunde" : "Stunden"} und ${String(minutes).padStart(2, "0")} Minuten`;
 }
 
-export function clockLabel(startCfg: Pick<StartConfig, "start_time" | "start_date" | "tick_minutes">, tick: number) {
-  const base = parseStartMinutes(startCfg.start_time);
-  const total = base + tick * tickMinutesOf(startCfg);
-  const dayOffset = Math.floor(total / (24 * 60));
-  const mins = ((total % (24 * 60)) + 24 * 60) % (24 * 60);
-  const hh = String(Math.floor(mins / 60)).padStart(2, "0");
-  const mm = String(mins % 60).padStart(2, "0");
-  const date = new Date(`${startCfg.start_date}T00:00:00`);
-  date.setDate(date.getDate() + dayOffset);
-  const y = date.getFullYear();
-  const mo = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${d}.${mo}.${y} ${hh}:${mm}`;
+/** Lokale Uhrzeit eines Ticks („TT.MM.JJJJ HH:MM“), berücksichtigt die Zeitumstellung. */
+export function clockLabel(startCfg: ClockConfig, tick: number) {
+  return formatWallClock(tickDateTime(startCfg, tick));
 }
 
 export function formatRes(n: number) {

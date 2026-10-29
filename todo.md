@@ -1,6 +1,4 @@
 # TODO
 
-> Bugfixes erst ab dem 20.11.2026 angehen (siehe `AGENTS.md`).
-
-- [ ] Bugfix taxes (1 tick later) — dabei prüfen, ob die "1 Tick später"-Funktion korrekt arbeitet
-- [ ] Bugfix times (Zeitumstellung)
+- [x] Bugfix taxes (1 tick later) — Steuern greifen jetzt ab dem Folgetick (gesetzt um 9:00 → gelten ab 9:15)
+- [x] Bugfix times (Zeitumstellung) — Uhrzeiten im Planer laufen in Echtzeit über die Zeitumstellung
